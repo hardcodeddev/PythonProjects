@@ -1,0 +1,272 @@
+# finalize_lineup_agent.py
+import os, sys, time, re, json
+from typing import List, Dict, Optional
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+from PIL import Image, ImageOps, ImageFilter
+import pytesseract
+from unidecode import unidecode
+
+_TESS = os.environ.get("TESSERACT_CMD")
+if _TESS:
+    pytesseract.pytesseract.tesseract_cmd = _TESS
+
+try:
+    from rapidfuzz import fuzz, process
+    _HAS_RAPIDFUZZ = True
+except Exception:
+    _HAS_RAPIDFUZZ = False
+    import difflib
+
+    class _FuzzShim:
+        @staticmethod
+        def token_sort_ratio(a: str, b: str) -> int:
+            ta = " ".join(sorted(a.lower().split()))
+            tb = " ".join(sorted(b.lower().split()))
+            return int(difflib.SequenceMatcher(None, ta, tb).ratio() * 100)
+
+        @staticmethod
+        def token_set_ratio(a: str, b: str) -> int:
+            sa, sb = set(a.lower().split()), set(b.lower().split())
+            ja, jb = " ".join(sorted(sa)), " ".join(sorted(sb))
+            return int(difflib.SequenceMatcher(None, ja, jb).ratio() * 100)
+
+    class _ProcessShim:
+        @staticmethod
+        def extractOne(query, choices, scorer):
+            best, best_score = None, -1
+            for c in choices:
+                s = scorer(query, c)
+                if s > best_score:
+                    best, best_score = c, s
+            return (best, best_score, None) if best is not None else (None, 0, None)
+
+    fuzz = _FuzzShim()
+    process = _ProcessShim()
+
+# --- Combined Utility Functions ---
+def fetch_and_process_image(page_url: str, folder: str = "lineup_images") -> Optional[str]:
+    """Fetch the most relevant image from a webpage and save it locally."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(page_url, timeout=25, headers=headers)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Find the best image
+        og = soup.find("meta", property="og:image")
+        og_url = og.get("content") if og and og.get("content") else None
+        best, best_score = (og_url, 2.5) if og_url else (None, -1.0)
+
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src")
+            if not src:
+                continue
+            full = src if src.startswith("http") else urljoin(page_url, src)
+            score = guess_image_priority(img)
+            if score > best_score:
+                best_score, best = score, full
+
+        if not best:
+            return None
+
+        # Download the image
+        os.makedirs(folder, exist_ok=True)
+        resp = requests.get(best, timeout=25, headers=headers)
+        resp.raise_for_status()
+        name = os.path.basename(urlparse(best).path) or "lineup.jpg"
+        if not os.path.splitext(name)[1]:
+            name += ".jpg"
+        path = os.path.join(folder, name)
+        with open(path, "wb") as f:
+            f.write(resp.content)
+        return path
+    except Exception as e:
+        print(f"[fetch_and_process_image] {e}", flush=True)
+        return None
+
+def process_image_for_artists(img_path: str) -> List[str]:
+    """Run OCR on an image and deduplicate artist names."""
+    try:
+        img = Image.open(img_path)
+        img = _prep_for_ocr(img)
+        raw = pytesseract.image_to_string(img)
+
+        # Extract artist names
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        artists = [normalize_name(ln) for ln in lines if is_plausible_artist_token(ln)]
+        return dedupe_artists(artists)
+    except Exception as e:
+        print(f"[process_image_for_artists] {e}", flush=True)
+        return []
+
+def scrape_lineup(page_url: str, use_musicbrainz: bool = False, max_artists: int = 60, mb_max_lookups: int = 25) -> Dict:
+    """End-to-end function to scrape lineup from a webpage."""
+    try:
+        print("[scrape] Fetching and processing image...", flush=True)
+        img_path = fetch_and_process_image(page_url)
+        if not img_path:
+            return {"ok": False, "error": "No lineup-like image found on page."}
+
+        print("[scrape] Extracting artists from image...", flush=True)
+        artists = process_image_for_artists(img_path)
+        if not artists:
+            return {"ok": False, "image": img_path, "error": "OCR returned no artist candidates."}
+
+        artists = artists[:max_artists]
+        print(f"[scrape] Found {len(artists)} artists (capped to {max_artists})", flush=True)
+
+        print("[scrape] Enriching genres...", flush=True)
+        genres_map = enrich_genres(artists, use_musicbrainz=use_musicbrainz, mb_max_lookups=mb_max_lookups)
+        enriched = [{"name": a, "genres": genres_map.get(a, [])} for a in artists]
+
+        return {"ok": True, "image": img_path, "count": len(enriched), "artists": enriched}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# Helper functions remain unchanged
+def guess_image_priority(img_tag) -> float:
+    score = 0.0
+    src = img_tag.get("src") or img_tag.get("data-src") or ""
+    if looks_like_lineup_filename(src):
+        score += 3.0
+    try:
+        w = int(img_tag.get("width") or 0)
+        h = int(img_tag.get("height") or 0)
+        area = w * h
+        if area > 500_000:
+            score += 2.0
+        elif area > 200_000:
+            score += 1.0
+    except Exception:
+        pass
+    alt = (img_tag.get("alt") or "").lower()
+    if any(k in alt for k in ["lineup", "poster", "phase"]):
+        score += 2.0
+    return score
+
+def _prep_for_ocr(img: Image.Image) -> Image.Image:
+    # Simple, effective preprocessing for busy posters
+    g = ImageOps.grayscale(img)
+    g = g.filter(ImageFilter.UnsharpMask(radius=2, percent=120, threshold=3))
+    # Light threshold (tune 170–200 depending on posters)
+    g = g.point(lambda p: 255 if p > 185 else 0)
+    return g
+
+def normalize_name(name: str) -> str:
+    name = unidecode(name)
+    name = re.sub(r"[^A-Za-z0-9\-’'&\.\+\s]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+def is_plausible_artist_token(t: str) -> bool:
+    if not t:
+        return False
+    words = t.split()
+    if len(words) > 6:
+        return False
+    if sum(ch.isdigit() for ch in t) > 2:
+        return False
+    bad = {"and","with","b2b","live","stage","hosted","special","guest",
+           "presents","takeover","vip","back-to-back","camp","village"}
+    if set(w.lower() for w in words).issubset(bad):
+        return False
+    return True
+
+def dedupe_artists(names: List[str]) -> List[str]:
+    cleaned = [normalize_name(n) for n in names if is_plausible_artist_token(normalize_name(n))]
+    out: List[str] = []
+    for n in cleaned:
+        if not out:
+            out.append(n); continue
+        match, score, _ = process.extractOne(n, out, scorer=fuzz.token_sort_ratio) or (None, 0, None)
+        if score < 88:
+            out.append(n)
+    return out
+
+def enrich_from_local_map(artist: str) -> Optional[List[str]]:
+    key = artist.lower()
+    if key in LOCAL_GENRE_MAP:
+        return LOCAL_GENRE_MAP[key]
+    match, score, _ = process.extractOne(key, LOCAL_GENRE_MAP.keys(), scorer=fuzz.token_set_ratio) or (None, 0, None)
+    if match and score >= 92:
+        return LOCAL_GENRE_MAP[match]
+    return None
+
+def musicbrainz_search_artist(name: str, pause: float = 0.4) -> Optional[str]:
+    try:
+        time.sleep(pause)  # polite
+        r = requests.get(
+            "https://musicbrainz.org/ws/2/artist/",
+            params={"query": name, "fmt": "json", "limit": 1},
+            headers={"User-Agent": "FestivalLineupAgent/1.0 (contact: you@example.com)"},
+            timeout=20,
+        )
+        r.raise_for_status()
+        js = r.json()
+        arts = js.get("artists") or []
+        if arts:
+            return arts[0].get("id")
+    except Exception:
+        return None
+    return None
+
+def musicbrainz_genres_for_artist(mbid: str, pause: float = 0.4) -> List[str]:
+    try:
+        time.sleep(pause)
+        r = requests.get(
+            f"https://musicbrainz.org/ws/2/artist/{mbid}",
+            params={"inc": "tags", "fmt": "json"},
+            headers={"User-Agent": "FestivalLineupAgent/1.0 (contact: you@example.com)"},
+            timeout=20,
+        )
+        r.raise_for_status()
+        js = r.json()
+        tags = js.get("tags") or []
+        genres = [t.get("name","").lower() for t in tags if t.get("count",0) >= 1]
+        return sorted(list(dict.fromkeys([g for g in genres if g])))[:6]
+    except Exception:
+        return []
+
+def enrich_genres(artists: List[str], use_musicbrainz: bool, mb_max_lookups: int) -> Dict[str, List[str]]:
+    result: Dict[str, List[str]] = {}
+    # First pass: local only
+    unknowns: List[str] = []
+    for a in artists:
+        local = enrich_from_local_map(a)
+        if local:
+            result[a] = local
+        else:
+            result[a] = []
+            unknowns.append(a)
+
+    if not use_musicbrainz or not unknowns:
+        return result
+
+    # Second pass: limited MusicBrainz lookups for unknowns
+    for a in unknowns[:mb_max_lookups]:
+        mbid = musicbrainz_search_artist(a)
+        if mbid:
+            genres = musicbrainz_genres_for_artist(mbid)
+            if genres:
+                result[a] = genres
+    return result
+
+# Expose as a tool for the agent
+def get_lineup_from_page(url: str, use_musicbrainz: bool = False, max_artists: int = 60, mb_max_lookups: int = 25) -> str:
+    res = scrape_lineup(
+        page_url=url,
+        use_musicbrainz=use_musicbrainz,
+        max_artists=max_artists,
+        mb_max_lookups=mb_max_lookups
+    )
+    return json.dumps(res, ensure_ascii=False)
+
+
+    # Keep tool list minimal to bias the model towards the one we want
+    available = {
+        "add_two_numbers": add_two_numbers,
+        "fetch_url": fetch_url,
+        "get_lineup_from_page": get_lineup_from_page,
+    }
