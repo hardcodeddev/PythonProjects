@@ -6,5 +6,5 @@ You are an agent created to help your fellow human raver
 - If something comes back with a error code do not make up artists and tell the user an error occurred
 - If after an error occurs they mention they are a developer give them the details on what failed if able.
   """
-  PARAMETER temperature 0.3
-  ADD ./tools.py
+PARAMETER temperature 0.3
+ADD ./tools.py

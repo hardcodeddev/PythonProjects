@@ -7,6 +7,7 @@ from urllib.parse import urljoin, urlparse
 from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 from unidecode import unidecode
+import ollama
 
 _TESS = os.environ.get("TESSERACT_CMD")
 if _TESS:
@@ -46,6 +47,10 @@ except Exception:
     process = _ProcessShim()
 
 # --- Combined Utility Functions ---
+def looks_like_lineup_filename(s: str) -> bool:
+    s = s.lower()
+    return any(k in s for k in ["lineup", "poster", "announce", "schedule", "phase"])
+
 def fetch_and_process_image(page_url: str, folder: str = "lineup_images") -> Optional[str]:
     """Fetch the most relevant image from a webpage and save it locally."""
     try:
@@ -263,10 +268,66 @@ def get_lineup_from_page(url: str, use_musicbrainz: bool = False, max_artists: i
     )
     return json.dumps(res, ensure_ascii=False)
 
+# -----------------
+# Agent run script
+# -----------------
+if __name__ == "__main__":
+    print("Write your query:", flush=True)
+    userMessage = input().strip()
 
     # Keep tool list minimal to bias the model towards the one we want
     available = {
-        "add_two_numbers": add_two_numbers,
-        "fetch_url": fetch_url,
         "get_lineup_from_page": get_lineup_from_page,
     }
+# TODO: Create method to get correct URL with local list for now will change to something more longterm TBA
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an agent that MUST call one of the provided tools whenever possible. "
+                "If the user asks to scrape a lineup or a festival page, ALWAYS call get_lineup_from_page "
+                "with the given URL. Prefer not to explain Selenium; prefer calling the tool."
+            ),
+        },
+        {"role": "user", "content": userMessage},
+    ]
+
+    # Register only the tools we actually want used
+    resp = ollama.chat(
+        model="llama3.1",
+        messages=messages,
+        tools=[get_lineup_from_page],
+    )
+
+    messages.append(resp.message)
+
+    # Execute tool calls (single pass)
+    for call in (resp.message.tool_calls or []):
+        fn = available.get(call.function.name)
+        if not fn:
+            continue
+        out = fn(**call.function.arguments)
+        messages.append({
+            "role": "tool",
+            "content": str(out),
+            "name": call.function.name,
+        })
+
+    # Final summarization turn: disable tools to avoid loops
+    messages.append({
+        "role": "system",
+        "content": (
+            "Now produce a short JSON summary strictly from the latest tool output. "
+            "Do NOT call any tools. If the tool returned JSON, return that JSON verbatim."
+        ),
+    })
+
+    final = ollama.chat(
+        model="llama3.1",
+        messages=messages,
+        tools=[]  # important: no tools in final turn
+    )
+
+    print(final.message.content, flush=True)
+    sys.exit(0)
+    
