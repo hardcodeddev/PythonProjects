@@ -113,10 +113,11 @@ def rank():
             use_audio=bool(payload.get("use_audio", False)),
             sr=int(sr) if sr else None,
             remap=_remap_from(payload),
+            audio_only=bool(payload.get("audio_only", False)),
         )
     except Exception as exc:  # noqa: BLE001
         return jsonify(error=f"Ranking failed: {exc}"), 500
-    return jsonify(records=records, count=len(tracks))
+    return jsonify(records=records, count=len(tracks), compared=len(records))
 
 
 @app.post("/api/pair")

@@ -795,6 +795,7 @@ class DoublingEngine:
         use_audio: bool = False,
         sr: Optional[int] = None,
         remap: Optional[tuple[str, str]] = None,
+        audio_only: bool = False,
     ) -> list[dict]:
         """Rank every track's top-N doubling partners as JSON-ready records.
 
@@ -803,17 +804,29 @@ class DoublingEngine:
         sub-scores — everything the web UI needs in one payload. When audio is
         enabled, each track's features are extracted once (O(n)) and reused
         across all pairings so the whole-library scan stays fast.
+
+        audio_only restricts both the source tracks and their candidate partners
+        to those with a local audio file — the pairings where the spectral,
+        rhythm and cue analyses actually apply. Original list indices are kept in
+        the output so callers can still address tracks by index.
         """
+        eligible = {
+            i for i, m in enumerate(tracks)
+            if not audio_only or m.get("path")
+        }
+
         feats: list[Optional[TrackFeatures]] = [None] * len(tracks)
         if use_audio:
-            for i, meta in enumerate(tracks):
-                feats[i] = self.load_features(meta, sr=sr, remap=remap)
+            for i in eligible:
+                feats[i] = self.load_features(tracks[i], sr=sr, remap=remap)
 
         records: list[dict] = []
         for i, meta_a in enumerate(tracks):
+            if i not in eligible:
+                continue
             candidates: list[dict] = []
             for j, meta_b in enumerate(tracks):
-                if i == j:
+                if i == j or j not in eligible:
                     continue
                 res = self.score_features(meta_a, meta_b, feats[i], feats[j])
                 candidates.append(
