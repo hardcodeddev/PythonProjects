@@ -89,6 +89,12 @@
     .b-bad  { background: color-mix(in srgb, var(--bad) 22%, transparent); color: var(--bad); }
     .cand .actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
     .cand .actions button { padding: 5px 9px; font-size: 11px; }
+    .cuepanel { margin: 0 0 8px 58px; padding: 10px 12px; border-left: 2px solid var(--accent-2); background: var(--panel-2); border-radius: 8px; font-size: 12.5px; }
+    .cuepanel .cuehead { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; margin-bottom: 6px; }
+    .cuepanel ul { margin: 0; padding-left: 16px; }
+    .cuepanel li { margin: 3px 0; }
+    .cuepanel .drops { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .cuepanel .drops .sub { background: var(--panel); }
     .err { color: var(--bad); font-size: 12px; margin-top: 10px; }
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -225,7 +231,8 @@
           <div class="stat"><b>${d.count}</b> tracks</div>
           <div class="stat"><b>${d.with_key}</b> with key</div>
           <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
-          <div class="stat"><b>${d.with_path}</b> with audio path</div>`;
+          <div class="stat"><b>${d.with_path}</b> with audio file</div>
+          ${d.streaming ? `<div class="stat"><b>${d.streaming}</b> streaming</div>` : ""}`;
         $("rankBtn").disabled = false;
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
@@ -271,17 +278,27 @@
     const fmt = (x) => (x == null ? "—" : (+x).toFixed(x >= 1 ? 0 : 2).replace(/^0/, ""));
     const bpmFmt = (x) => (x == null ? "—" : (+x).toFixed(0));
 
-    function candRow(rec, c) {
+    // Inner grid row (re-rendered on its own after audio analysis).
+    function candInner(rec, c) {
       const col = scoreColor(c.score);
+      const id = `${rec.index}-${c.partner_index}`;
       const subs = [
         ["key", c.key_score, false],
         ["bpm", c.bpm_score, false],
         ["spec", c.spectral_pocket_score, c.needs_audio_analysis],
         ["rhy", c.rhythm_pocket_score, c.needs_audio_analysis],
       ].map(([n, v, est]) => `<span class="sub ${est ? "est" : ""}">${n} ${fmt(v)}</span>`).join("");
-      const analyzeBtn = c.needs_audio_analysis
-        ? `<button class="ghost" data-i="${rec.index}" data-j="${c.partner_index}">Analyze audio</button>` : "";
-      return `<div class="cand" data-cand="${rec.index}-${c.partner_index}">
+      const bothAudio = rec.has_audio && c.has_audio;
+      let actions = "";
+      if (c.needs_audio_analysis) {
+        actions += bothAudio
+          ? `<button class="ghost" data-action="analyze" data-i="${rec.index}" data-j="${c.partner_index}">Analyze audio</button>`
+          : `<span class="sub est" title="audio analysis needs both tracks as local files">${(rec.streaming || c.streaming) ? "streaming" : "no local file"}</span>`;
+      }
+      if (bothAudio) {
+        actions += `<button class="ghost" data-action="cues" data-i="${rec.index}" data-j="${c.partner_index}">Suggest cues</button>`;
+      }
+      return `<div class="cand" data-cand="${id}">
         <div class="scorebubble" style="color:${col}">${c.score.toFixed(2)}</div>
         <div class="who">
           <div class="n">${esc(c.title)} <span class="keychip">${c.camelot_key || "?"}</span> <span class="muted">${bpmFmt(c.bpm)}</span></div>
@@ -290,9 +307,15 @@
         </div>
         <div class="actions">
           <span class="badge ${badgeClass(c.verdict)}">${esc(c.verdict)}</span>
-          ${analyzeBtn}
+          ${actions}
         </div>
       </div>`;
+    }
+
+    // Wrapper keeps the inner row + a cue panel sibling that survives re-renders.
+    function candRow(rec, c) {
+      const id = `${rec.index}-${c.partner_index}`;
+      return `<div class="candwrap">${candInner(rec, c)}<div class="cuepanel" data-cue="${id}" hidden></div></div>`;
     }
 
     function renderResults() {
@@ -313,11 +336,17 @@
           </summary>
           <div class="cands">${rec.candidates.map(c => candRow(rec, c)).join("")}</div>
         </details>`).join("");
-      host.querySelectorAll("button[data-i]").forEach(b => b.addEventListener("click", onAnalyze));
     }
 
-    async function onAnalyze(e) {
-      const btn = e.currentTarget;
+    // One delegated click handler for all candidate action buttons.
+    $("results").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      if (btn.dataset.action === "analyze") onAnalyze(btn);
+      else if (btn.dataset.action === "cues") onCues(btn);
+    });
+
+    async function onAnalyze(btn) {
       const i = +btn.dataset.i, j = +btn.dataset.j;
       btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
       try {
@@ -325,7 +354,6 @@
         const r = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Analyze failed");
-        // patch the record + re-render this row
         const rec = RECORDS.find(x => x.index === i);
         const c = rec.candidates.find(x => x.partner_index === j);
         Object.assign(c, {
@@ -333,13 +361,11 @@
           spectral_pocket_score: d.result.spectral_pocket_score, rhythm_pocket_score: d.result.rhythm_pocket_score,
           verdict: d.result.verdict, needs_audio_analysis: d.result.needs_audio_analysis,
         });
-        const rowEl = document.querySelector(`[data-cand="${i}-${j}"]`);
-        rowEl.outerHTML = candRow(rec, c);
-        const newBtn = document.querySelector(`[data-cand="${i}-${j}"] button[data-i]`);
-        if (newBtn) newBtn.addEventListener("click", onAnalyze);
+        // Re-render only the inner grid row; the cue panel sibling is preserved.
+        document.querySelector(`[data-cand="${i}-${j}"]`).outerHTML = candInner(rec, c);
         if (d.missing_audio && d.missing_audio.length) {
-          const el = document.querySelector(`[data-cand="${i}-${j}"] .actions`);
-          el.insertAdjacentHTML("beforeend", `<span class="sub est" title="couldn't load audio">no audio</span>`);
+          document.querySelector(`[data-cand="${i}-${j}"] .actions`)
+            .insertAdjacentHTML("beforeend", `<span class="sub est" title="couldn't load audio">no audio</span>`);
         }
       } catch (err) {
         btn.disabled = false; btn.textContent = "Retry";
@@ -347,6 +373,34 @@
       }
     }
 
+    async function onCues(btn) {
+      const i = +btn.dataset.i, j = +btn.dataset.j;
+      const panel = document.querySelector(`[data-cue="${i}-${j}"]`);
+      if (panel.dataset.loaded) { panel.hidden = !panel.hidden; return; }  // toggle
+      btn.disabled = true; const label = btn.textContent; btn.innerHTML = '<span class="spinner"></span>';
+      try {
+        const body = { ...payloadBase(), i, j };
+        const r = await fetch("/api/cues", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.reason || d.error || "Cue analysis failed");
+        const drops = `<div class="drops">
+          <span class="sub">drop A ${mmss(d.a.drop_time_sec)}</span>
+          <span class="sub">cue A ${mmss(d.a.first_downbeat_sec)}</span>
+          <span class="sub">drop B ${mmss(d.b.drop_time_sec)}</span>
+          <span class="sub">cue B ${mmss(d.b.first_downbeat_sec)}</span>
+        </div>`;
+        panel.innerHTML = `<div class="cuehead">Suggested mixing cues</div>
+          <ul>${d.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>${drops}`;
+        panel.dataset.loaded = "1";
+        panel.hidden = false;
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        btn.disabled = false; btn.textContent = label;
+      }
+    }
+
+    function mmss(sec) { if (sec == null) return "?"; const m = Math.floor(sec / 60); return `${m}:${(sec - 60*m).toFixed(1).padStart(4,"0")}`; }
     function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m])); }
     $("filter").addEventListener("input", renderResults);
 
