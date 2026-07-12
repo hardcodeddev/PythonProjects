@@ -148,6 +148,21 @@ def pair():
     )
 
 
+@app.post("/api/cues")
+def cues():
+    """Suggest mixing cue points for doubling two tracks (needs local audio)."""
+    tracks = STATE["tracks"]
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        i, j = int(payload["i"]), int(payload["j"])
+        meta_a, meta_b = tracks[i], tracks[j]
+    except (KeyError, IndexError, ValueError, TypeError):
+        return jsonify(ok=False, reason="Invalid track indices."), 400
+
+    out = ds.DoublingEngine().suggest_cues(meta_a, meta_b, remap=_remap_from(payload))
+    return jsonify(out)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="127.0.0.1", port=port, debug=True)

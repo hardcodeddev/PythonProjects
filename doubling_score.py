@@ -90,6 +90,10 @@ _DENSITY_HIGH = 8.0
 # Length (seconds) of the drop excerpt to analyze when we have to pick one.
 _DROP_EXCERPT_SEC = 8.0
 
+# Beats per phrase in 4/4 bass music (16 beats = 4 bars) — the natural grid DJs
+# cue and launch on. Used by the mixing-cue suggestions.
+_BEATS_PER_PHRASE = 16
+
 
 @dataclass
 class DoublingResult:
@@ -349,6 +353,22 @@ def _librosa_load(path: str, **kwargs) -> tuple[np.ndarray, int]:
         return librosa.load(path, **kwargs)
 
 
+def _loudest_window_start_sec(y: np.ndarray, sr: int, duration_sec: float) -> float:
+    """Start time (seconds) of the loudest `duration_sec` window in y."""
+    win = int(duration_sec * sr)
+    if win <= 0 or len(y) <= win:
+        return 0.0
+    hop = _STFT_HOP
+    rms = librosa.feature.rms(y=y, frame_length=_STFT_N_FFT, hop_length=hop)[0]
+    frames_per_win = max(1, win // hop)
+    if len(rms) <= frames_per_win:
+        return 0.0
+    # Rolling sum of energy over a window-worth of frames.
+    csum = np.concatenate([[0.0], np.cumsum(rms)])
+    window_energy = csum[frames_per_win:] - csum[:-frames_per_win]
+    return int(np.argmax(window_energy)) * hop / sr
+
+
 def load_drop_section(
     path: str,
     sr: Optional[int] = None,
@@ -371,19 +391,133 @@ def load_drop_section(
     win = int(duration_sec * sr)
     if win <= 0 or len(y) <= win:
         return y, sr
-
-    # Find the loudest window via an RMS envelope, then map back to samples.
-    hop = _STFT_HOP
-    rms = librosa.feature.rms(y=y, frame_length=_STFT_N_FFT, hop_length=hop)[0]
-    frames_per_win = max(1, win // hop)
-    if len(rms) <= frames_per_win:
-        return y[:win], sr
-    # Rolling sum of energy over a window-worth of frames.
-    csum = np.concatenate([[0.0], np.cumsum(rms)])
-    window_energy = csum[frames_per_win:] - csum[:-frames_per_win]
-    start_frame = int(np.argmax(window_energy))
-    start = start_frame * hop
+    start = int(_loudest_window_start_sec(y, sr, duration_sec) * sr)
     return y[start:start + win], sr
+
+
+# ---------------------------------------------------------------------------
+# Mixing-cue analysis
+# ---------------------------------------------------------------------------
+def _fmt_time(sec: Optional[float]) -> str:
+    """Seconds -> 'm:ss.d' for DJ-readable cue points."""
+    if sec is None:
+        return "?"
+    m = int(sec // 60)
+    return f"{m}:{sec - 60 * m:04.1f}"
+
+
+def analyze_cues(
+    path: str,
+    bpm: Optional[float] = None,
+    sr: Optional[int] = None,
+    offset_sec: Optional[float] = None,
+    duration_sec: float = _DROP_EXCERPT_SEC,
+) -> dict:
+    """Locate a track's drop and beatgrid for cueing.
+
+    Returns the drop point (loudest window start, or an explicit offset), the
+    first detected beat at/after the drop (a precise hot-cue position), and the
+    beat/phrase spacing from the known BPM (falling back to librosa's estimate).
+    """
+    _require_librosa()
+    y, used_sr = _librosa_load(path, sr=sr, mono=True)
+    total = len(y) / used_sr if used_sr else 0.0
+
+    drop_sec = float(offset_sec) if offset_sec is not None else _loudest_window_start_sec(
+        y, used_sr, duration_sec
+    )
+
+    # Beat-track a window at the drop to get beat phase (where beats land).
+    start = int(drop_sec * used_sr)
+    seg = y[start:start + int(duration_sec * used_sr)]
+    if len(seg) < used_sr:  # too short — analyze from the drop to the end
+        seg = y[start:]
+    detected_bpm = None
+    first_beat_sec = drop_sec
+    if len(seg) >= used_sr // 2:
+        tempo, beat_frames = librosa.beat.beat_track(
+            y=seg, sr=used_sr, start_bpm=float(bpm) if bpm else 150.0, units="frames"
+        )
+        detected_bpm = float(np.atleast_1d(tempo)[0])
+        beat_times = librosa.frames_to_time(beat_frames, sr=used_sr)
+        if len(beat_times):
+            first_beat_sec = drop_sec + float(beat_times[0])
+
+    use_bpm = float(bpm) if bpm else detected_bpm
+    beat_interval = 60.0 / use_bpm if use_bpm else None
+    phrase_sec = beat_interval * _BEATS_PER_PHRASE if beat_interval else None
+
+    return {
+        "drop_time_sec": round(drop_sec, 3),
+        "first_downbeat_sec": round(first_beat_sec, 3),
+        "meta_bpm": float(bpm) if bpm else None,
+        "detected_bpm": round(detected_bpm, 2) if detected_bpm else None,
+        "beat_interval_sec": round(beat_interval, 4) if beat_interval else None,
+        "phrase_sec": round(phrase_sec, 3) if phrase_sec else None,
+        "beats_per_phrase": _BEATS_PER_PHRASE,
+        "track_duration_sec": round(total, 1),
+    }
+
+
+def _tempo_relationship(bpm_a: Optional[float], bpm_b: Optional[float], tol_pct: float = 6.0):
+    """How B's tempo relates to A: 'same', 'half', 'double', or None."""
+    if not bpm_a or not bpm_b:
+        return None
+    if _pct_diff(bpm_a, bpm_b) <= tol_pct:
+        return "same"
+    if _pct_diff(bpm_b, bpm_a * 0.5) <= tol_pct:
+        return "half"
+    if _pct_diff(bpm_b, bpm_a * 2.0) <= tol_pct:
+        return "double"
+    return None
+
+
+def _build_cue_lines(meta_a: dict, meta_b: dict, ca: dict, cb: dict) -> list[str]:
+    """Human-readable doubling-cue instructions from two cue analyses."""
+    ta = meta_a.get("title", "Track A")
+    tb = meta_b.get("title", "Track B")
+    lines = [
+        f"Hot-cue each track on its drop — {ta}: {_fmt_time(ca['first_downbeat_sec'])} · "
+        f"{tb}: {_fmt_time(cb['first_downbeat_sec'])}.",
+    ]
+    if ca["phrase_sec"] and cb["phrase_sec"]:
+        lines.append(
+            f"Phrase grid (16 beats): {ta} ≈ {ca['phrase_sec']}s "
+            f"@ {ca['meta_bpm'] or ca['detected_bpm']} BPM · "
+            f"{tb} ≈ {cb['phrase_sec']}s @ {cb['meta_bpm'] or cb['detected_bpm']} BPM."
+        )
+
+    rel = _tempo_relationship(meta_a.get("bpm"), meta_b.get("bpm"))
+    drop_a = _fmt_time(ca["first_downbeat_sec"])
+    if rel in ("same", None):
+        line = (
+            f"Beatmatch {tb} to {ta}. Over {ta}'s final build, launch {tb} from its "
+            f"drop cue so both drops hit together on {ta}'s drop at {drop_a}."
+        )
+        if ca["phrase_sec"]:
+            line += (
+                f" Start {tb} ~one phrase ({ca['phrase_sec']}s) before {drop_a} and sync "
+                f"the downbeats."
+            )
+        lines.append(line)
+    elif rel == "half":
+        lines.append(
+            f"{tb} reads as half-time of {ta}. Sync at the 2× relationship — align {tb}'s "
+            f"downbeat to every other downbeat of {ta} — and fire {tb}'s drop on {ta}'s drop "
+            f"at {drop_a}."
+        )
+    elif rel == "double":
+        lines.append(
+            f"{tb} reads as double-time of {ta}. Sync at the 2× relationship — {ta}'s "
+            f"downbeat lands on every other {tb} downbeat — and fire {tb}'s drop on {ta}'s "
+            f"drop at {drop_a}."
+        )
+
+    lines.append(
+        "Bring the incoming track's lows in only once the drops are locked (or EQ-carve the "
+        "sub) to avoid the bass clash."
+    )
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +761,32 @@ class DoublingEngine:
         except Exception as exc:  # noqa: BLE001 - one bad file shouldn't kill a batch
             print(f"  ! audio analysis failed for {path}: {exc}", file=sys.stderr)
             return None
+
+    def suggest_cues(
+        self,
+        meta_a: dict,
+        meta_b: dict,
+        sr: Optional[int] = None,
+        remap: Optional[tuple[str, str]] = None,
+    ) -> dict:
+        """Suggest drop/beatgrid cue points for doubling A and B together.
+
+        Both tracks need a local audio file. Returns {ok, a, b, lines} where a/b
+        are per-track cue analyses and lines are DJ-readable instructions.
+        """
+        path_a = _apply_path_remap(meta_a.get("path"), remap)
+        path_b = _apply_path_remap(meta_b.get("path"), remap)
+        if librosa is None:
+            return {"ok": False, "reason": "librosa is not installed."}
+        if not path_a or not path_b:
+            missing = [m.get("title", "?") for m, p in ((meta_a, path_a), (meta_b, path_b)) if not p]
+            return {"ok": False, "reason": f"needs a local audio file for: {', '.join(missing)}"}
+        try:
+            ca = analyze_cues(path_a, bpm=meta_a.get("bpm"), sr=sr, offset_sec=meta_a.get("drop_offset_sec"))
+            cb = analyze_cues(path_b, bpm=meta_b.get("bpm"), sr=sr, offset_sec=meta_b.get("drop_offset_sec"))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"cue analysis failed: {exc}"}
+        return {"ok": True, "a": ca, "b": cb, "lines": _build_cue_lines(meta_a, meta_b, ca, cb)}
 
     def rank(
         self,
