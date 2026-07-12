@@ -656,6 +656,30 @@ def _apply_path_remap(path: Optional[str], remap: Optional[tuple[str, str]]) -> 
     return path
 
 
+# A URI scheme is 2+ chars before the first ':' ('soundcloud:', 'http:', 'tidal:').
+# A single char before ':' is a Windows drive letter ('C:\...'), which is local.
+_URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]+:")
+
+
+def _is_local_path(path: Optional[str]) -> bool:
+    """True only for a real local filesystem path.
+
+    Streaming/library-only tracks (SoundCloud, TIDAL, Beatport, Apple Music, an
+    http(s) URL, …) carry a 'scheme:' URI instead of a file — those have no local
+    audio to load, so this returns False for them.
+    """
+    if not path:
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", path):  # Windows drive, e.g. 'C:\Music'
+        return True
+    return not _URI_SCHEME_RE.match(path)
+
+
+def _has_local_audio(meta: dict) -> bool:
+    """True when a track has a loadable local audio file (not a streaming URI)."""
+    return not meta.get("streaming") and _is_local_path(meta.get("path"))
+
+
 @dataclass
 class DoublingEngine:
     """Configurable doubling-compatibility scorer.
@@ -752,8 +776,10 @@ class DoublingEngine:
         remap: Optional[tuple[str, str]] = None,
     ) -> Optional[TrackFeatures]:
         """Load a drop excerpt and extract its features, tolerating bad files."""
+        if meta.get("streaming") or librosa is None:
+            return None
         path = _apply_path_remap(meta.get("path"), remap)
-        if not path or librosa is None:
+        if not _is_local_path(path):  # streaming URI (soundcloud:, http:, …) — nothing to load
             return None
         try:
             y, used_sr = load_drop_section(path, sr=sr, offset_sec=meta.get("drop_offset_sec"))
@@ -778,8 +804,12 @@ class DoublingEngine:
         path_b = _apply_path_remap(meta_b.get("path"), remap)
         if librosa is None:
             return {"ok": False, "reason": "librosa is not installed."}
-        if not path_a or not path_b:
-            missing = [m.get("title", "?") for m, p in ((meta_a, path_a), (meta_b, path_b)) if not p]
+        if not _has_local_audio({**meta_a, "path": path_a}) or not _has_local_audio({**meta_b, "path": path_b}):
+            missing = [
+                m.get("title", "?")
+                for m, p in ((meta_a, path_a), (meta_b, path_b))
+                if not _has_local_audio({**m, "path": p})
+            ]
             return {"ok": False, "reason": f"needs a local audio file for: {', '.join(missing)}"}
         try:
             ca = analyze_cues(path_a, bpm=meta_a.get("bpm"), sr=sr, offset_sec=meta_a.get("drop_offset_sec"))
@@ -812,7 +842,7 @@ class DoublingEngine:
         """
         eligible = {
             i for i, m in enumerate(tracks)
-            if not audio_only or m.get("path")
+            if not audio_only or _has_local_audio(m)
         }
 
         feats: list[Optional[TrackFeatures]] = [None] * len(tracks)
@@ -843,7 +873,7 @@ class DoublingEngine:
                         "rhythm_pocket_score": res.rhythm_pocket_score,
                         "verdict": res.verdict,
                         "needs_audio_analysis": res.needs_audio_analysis,
-                        "has_audio": bool(meta_b.get("path")),
+                        "has_audio": _has_local_audio(meta_b),
                         "streaming": bool(meta_b.get("streaming")),
                     }
                 )
@@ -855,7 +885,7 @@ class DoublingEngine:
                     "artist": meta_a.get("artist"),
                     "bpm": meta_a.get("bpm"),
                     "camelot_key": meta_a.get("camelot_key"),
-                    "has_audio": bool(meta_a.get("path")),
+                    "has_audio": _has_local_audio(meta_a),
                     "streaming": bool(meta_a.get("streaming")),
                     "candidates": candidates[:top_n],
                 }
