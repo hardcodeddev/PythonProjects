@@ -225,7 +225,8 @@
           <div class="stat"><b>${d.count}</b> tracks</div>
           <div class="stat"><b>${d.with_key}</b> with key</div>
           <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
-          <div class="stat"><b>${d.with_path}</b> with audio path</div>`;
+          <div class="stat"><b>${d.with_path}</b> with audio file</div>
+          ${d.streaming ? `<div class="stat"><b>${d.streaming}</b> streaming</div>` : ""}`;
         $("rankBtn").disabled = false;
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
@@ -279,8 +280,15 @@
         ["spec", c.spectral_pocket_score, c.needs_audio_analysis],
         ["rhy", c.rhythm_pocket_score, c.needs_audio_analysis],
       ].map(([n, v, est]) => `<span class="sub ${est ? "est" : ""}">${n} ${fmt(v)}</span>`).join("");
-      const analyzeBtn = c.needs_audio_analysis
-        ? `<button class="ghost" data-i="${rec.index}" data-j="${c.partner_index}">Analyze audio</button>` : "";
+      let analyzeBtn = "";
+      if (c.needs_audio_analysis) {
+        if (rec.has_audio && c.has_audio) {
+          analyzeBtn = `<button class="ghost" data-i="${rec.index}" data-j="${c.partner_index}">Analyze audio</button>`;
+        } else {
+          const why = (rec.streaming || c.streaming) ? "streaming" : "no local file";
+          analyzeBtn = `<span class="sub est" title="audio analysis needs both tracks as local files">${why}</span>`;
+        }
+      }
       return `<div class="cand" data-cand="${rec.index}-${c.partner_index}">
         <div class="scorebubble" style="color:${col}">${c.score.toFixed(2)}</div>
         <div class="who">

@@ -31,6 +31,7 @@ import argparse
 import json
 import re
 import sys
+import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -334,6 +335,20 @@ def _band_energy_envelopes(y: np.ndarray, sr: int) -> dict[str, np.ndarray]:
     return envelopes
 
 
+def _librosa_load(path: str, **kwargs) -> tuple[np.ndarray, int]:
+    """librosa.load with the noisy soundfile/audioread fallback warnings muted.
+
+    Compressed formats (mp3/m4a) often can't be read by libsndfile, so librosa
+    falls back to audioread and emits a UserWarning + a deprecation FutureWarning
+    on every call. The fallback still works and real failures raise exceptions
+    (which callers catch), so these particular warnings are just noise.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        warnings.simplefilter("ignore", FutureWarning)
+        return librosa.load(path, **kwargs)
+
+
 def load_drop_section(
     path: str,
     sr: Optional[int] = None,
@@ -349,10 +364,10 @@ def load_drop_section(
     _require_librosa()
 
     if offset_sec is not None:
-        y, sr = librosa.load(path, sr=sr, offset=offset_sec, duration=duration_sec, mono=True)
+        y, sr = _librosa_load(path, sr=sr, offset=offset_sec, duration=duration_sec, mono=True)
         return y, sr
 
-    y, sr = librosa.load(path, sr=sr, mono=True)
+    y, sr = _librosa_load(path, sr=sr, mono=True)
     win = int(duration_sec * sr)
     if win <= 0 or len(y) <= win:
         return y, sr
@@ -655,6 +670,8 @@ class DoublingEngine:
                         "rhythm_pocket_score": res.rhythm_pocket_score,
                         "verdict": res.verdict,
                         "needs_audio_analysis": res.needs_audio_analysis,
+                        "has_audio": bool(meta_b.get("path")),
+                        "streaming": bool(meta_b.get("streaming")),
                     }
                 )
             candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -665,6 +682,8 @@ class DoublingEngine:
                     "artist": meta_a.get("artist"),
                     "bpm": meta_a.get("bpm"),
                     "camelot_key": meta_a.get("camelot_key"),
+                    "has_audio": bool(meta_a.get("path")),
+                    "streaming": bool(meta_a.get("streaming")),
                     "candidates": candidates[:top_n],
                 }
             )
@@ -730,21 +749,26 @@ def batch_top_candidates(
 # Input loading (JSON track list or rekordbox library XML)
 # ---------------------------------------------------------------------------
 def _rekordbox_location_to_path(location: Optional[str]) -> Optional[str]:
-    """Decode a rekordbox Location attribute into a filesystem path.
+    """Decode a rekordbox Location attribute into a local filesystem path.
 
-    Locations look like 'file://localhost/Users/dj/Music/track.mp3' and are
-    URL-encoded; on Windows they carry a drive letter ('/C:/...').
+    Local files look like 'file://localhost/Users/dj/Music/track.mp3' (URL-
+    encoded; Windows carries a drive letter, '/C:/...'). Streaming tracks
+    (SoundCloud/Tidal/Beatport/Apple Music links such as 'soundcloud:tracks:123')
+    have no local file, so this returns None for them.
     """
-    if not location:
+    if not location or not location.startswith("file://"):
         return None
-    p = unquote(location)
-    if p.startswith("file://"):
-        p = p[len("file://"):]
-        if p.startswith("localhost"):
-            p = p[len("localhost"):]
+    p = unquote(location[len("file://"):])
+    if p.startswith("localhost"):
+        p = p[len("localhost"):]
     if re.match(r"^/[A-Za-z]:/", p):  # '/C:/Music' -> 'C:/Music'
         p = p[1:]
     return p
+
+
+def _is_streaming_location(location: Optional[str]) -> bool:
+    """True for a non-local rekordbox Location (a streaming-service link)."""
+    return bool(location) and not location.startswith("file://")
 
 
 def load_rekordbox_xml(
@@ -784,12 +808,14 @@ def load_rekordbox_xml(
         if skip_missing_key and not camelot:
             continue
 
+        location = tr.get("Location")
         tracks.append(
             {
                 "title": title or tr.get("TrackID") or "?",
                 "artist": artist,
                 "name": name,
-                "path": _rekordbox_location_to_path(tr.get("Location")),
+                "path": _rekordbox_location_to_path(location),
+                "streaming": _is_streaming_location(location),
                 "bpm": bpm,
                 "camelot_key": camelot,
                 "track_id": tr.get("TrackID"),

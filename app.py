@@ -30,7 +30,7 @@ app = Flask(__name__)
 STATE: dict = {"tracks": [], "source": None}
 
 _TRUE = {"1", "true", "on", "yes", "True"}
-_SUMMARY_FIELDS = ("title", "artist", "bpm", "camelot_key", "path")
+_SUMMARY_FIELDS = ("title", "artist", "bpm", "camelot_key", "path", "streaming")
 
 
 def _engine_from(payload: dict) -> ds.DoublingEngine:
@@ -91,6 +91,7 @@ def upload():
         with_key=sum(1 for t in tracks if t.get("camelot_key")),
         with_bpm=sum(1 for t in tracks if t.get("bpm")),
         with_path=sum(1 for t in tracks if t.get("path")),
+        streaming=sum(1 for t in tracks if t.get("streaming")),
         tracks=[{k: t.get(k) for k in _SUMMARY_FIELDS} for t in tracks],
     )
 
