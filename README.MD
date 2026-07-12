@@ -20,7 +20,10 @@ A local Flask front end (`app.py` + `templates/index.html`) makes it usable
 without the CLI: upload a rekordbox XML (or JSON), tune the sub-score weights
 live, and browse each track's top doubling partners. Run the full audio
 "pocket" analysis across the whole library, or deep-analyze a single pair on
-demand. For any pair with local audio, **Suggest cues** locates each track's
+demand. An **Audio files only** toggle restricts the comparison to tracks that
+have a local file (dropping streaming/library-only entries), so every pairing
+supports the pocket and cue analyses. For any pair with local audio, **Suggest
+cues** locates each track's
 drop and beatgrid (`DoublingEngine.suggest_cues` / `analyze_cues`) and returns
 DJ-ready instructions: hot-cue points, the 16-beat phrase length, and how to
 launch the incoming track so both drops land together.
