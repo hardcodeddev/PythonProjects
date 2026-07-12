@@ -389,10 +389,11 @@ def spectral_pocket_score(y_a: np.ndarray, y_b: np.ndarray, sr: int) -> float:
     _require_librosa()
     if len(y_a) == 0 or len(y_b) == 0:
         return 0.0
+    return _spectral_from_envelopes(_band_energy_envelopes(y_a, sr), _band_energy_envelopes(y_b, sr))
 
-    env_a = _band_energy_envelopes(y_a, sr)
-    env_b = _band_energy_envelopes(y_b, sr)
 
+def _spectral_from_envelopes(env_a: dict, env_b: dict) -> float:
+    """Weighted complementary-pocket score from two tracks' band envelopes."""
     total = 0.0
     for name, weight in _BAND_WEIGHTS.items():
         corr = _safe_corr(env_a[name], env_b[name])
@@ -400,7 +401,6 @@ def spectral_pocket_score(y_a: np.ndarray, y_b: np.ndarray, sr: int) -> float:
         # anti-correlated (-1) is the best complementary fit.
         pocket = (1.0 - corr) / 2.0
         total += weight * pocket
-
     return float(np.clip(total, 0.0, 1.0))
 
 
@@ -435,27 +435,53 @@ def rhythm_pocket_score(y_a: np.ndarray, y_b: np.ndarray, sr: int) -> float:
     _require_librosa()
     if len(y_a) == 0 or len(y_b) == 0:
         return 0.0
+    return _rhythm_from_onsets(
+        _onset_density(y_a, sr),
+        _onset_density(y_b, sr),
+        librosa.onset.onset_strength(y=y_a, sr=sr),
+        librosa.onset.onset_strength(y=y_b, sr=sr),
+    )
 
+
+def _rhythm_from_onsets(
+    dens_a: float, dens_b: float, str_a: np.ndarray, str_b: np.ndarray
+) -> float:
+    """Rhythm-pocket score from two tracks' onset densities + strength envelopes."""
     # (1) Sparseness. Both must be dense to clash -> use the smaller density.
-    dens_a = _onset_density(y_a, sr)
-    dens_b = _onset_density(y_b, sr)
     crowd = min(dens_a, dens_b)
     span = _DENSITY_HIGH - _DENSITY_LOW
-    sparseness = 1.0 - (crowd - _DENSITY_LOW) / span
-    sparseness = float(np.clip(sparseness, 0.0, 1.0))
+    sparseness = float(np.clip(1.0 - (crowd - _DENSITY_LOW) / span, 0.0, 1.0))
 
     # (2) Interleave. Continuous onset-strength envelope is less noisy than
     # discrete onsets for correlation.
-    str_a = librosa.onset.onset_strength(y=y_a, sr=sr)
-    str_b = librosa.onset.onset_strength(y=y_b, sr=sr)
-    corr = _safe_corr(str_a, str_b)
-    interleave = (1.0 - corr) / 2.0
+    interleave = (1.0 - _safe_corr(str_a, str_b)) / 2.0
 
     return float(np.clip(0.5 * sparseness + 0.5 * interleave, 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
-# Pair scoring
+# Per-track audio features (extracted once, reused across every pairing so a
+# whole-library audio scan stays O(n) STFTs instead of O(n^2)).
+# ---------------------------------------------------------------------------
+@dataclass
+class TrackFeatures:
+    band_env: dict          # per-band RMS energy envelope over time
+    onset_strength: np.ndarray
+    onset_density: float    # onsets/sec
+
+
+def extract_features(y: np.ndarray, sr: int) -> TrackFeatures:
+    """Compute the audio features the pocket scores need, once per track."""
+    _require_librosa()
+    return TrackFeatures(
+        band_env=_band_energy_envelopes(y, sr),
+        onset_strength=librosa.onset.onset_strength(y=y, sr=sr),
+        onset_density=_onset_density(y, sr),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scoring engine
 # ---------------------------------------------------------------------------
 def _verdict_for(score: float) -> str:
     if score >= 0.80:
@@ -467,6 +493,189 @@ def _verdict_for(score: float) -> str:
     return "not recommended"
 
 
+def _apply_path_remap(path: Optional[str], remap: Optional[tuple[str, str]]) -> Optional[str]:
+    """Rewrite a track path prefix (e.g. a library recorded on another machine).
+
+    remap is a (from_prefix, to_prefix) pair; paths that don't start with
+    from_prefix are returned unchanged.
+    """
+    if not path or not remap:
+        return path
+    frm, to = remap
+    if frm and path.startswith(frm):
+        return to + path[len(frm):]
+    return path
+
+
+@dataclass
+class DoublingEngine:
+    """Configurable doubling-compatibility scorer.
+
+    The four sub-score weights are instance attributes so a caller (e.g. the web
+    UI) can tune them live without touching module globals. Weights are
+    normalized by their sum at score time, so they need not add up to 1.0.
+    """
+
+    weight_key: float = WEIGHT_KEY
+    weight_bpm: float = WEIGHT_BPM
+    weight_spectral: float = WEIGHT_SPECTRAL_POCKET
+    weight_rhythm: float = WEIGHT_RHYTHM_POCKET
+    bpm_tolerance_pct: float = 2.0
+
+    def _weights(self) -> tuple[float, float, float, float]:
+        raw = (self.weight_key, self.weight_bpm, self.weight_spectral, self.weight_rhythm)
+        total = sum(raw)
+        if total <= 0:
+            # Degenerate config — fall back to the module defaults.
+            return WEIGHT_KEY, WEIGHT_BPM, WEIGHT_SPECTRAL_POCKET, WEIGHT_RHYTHM_POCKET
+        return tuple(w / total for w in raw)  # type: ignore[return-value]
+
+    def score_features(
+        self,
+        track_a_meta: dict,
+        track_b_meta: dict,
+        feat_a: Optional[TrackFeatures] = None,
+        feat_b: Optional[TrackFeatures] = None,
+    ) -> DoublingResult:
+        """Score one pair from metadata + optional cached audio features."""
+        key_score = camelot_distance(
+            track_a_meta.get("camelot_key"), track_b_meta.get("camelot_key")
+        )
+        bpm_score = bpm_doubling_score(
+            track_a_meta.get("bpm"), track_b_meta.get("bpm"), tolerance_pct=self.bpm_tolerance_pct
+        )
+
+        have_audio = feat_a is not None and feat_b is not None
+        if have_audio:
+            spec_score = _spectral_from_envelopes(feat_a.band_env, feat_b.band_env)
+            rhythm_score = _rhythm_from_onsets(
+                feat_a.onset_density, feat_b.onset_density,
+                feat_a.onset_strength, feat_b.onset_strength,
+            )
+        else:
+            spec_score = AUDIO_UNAVAILABLE_DEFAULT
+            rhythm_score = AUDIO_UNAVAILABLE_DEFAULT
+
+        w_key, w_bpm, w_spec, w_rhythm = self._weights()
+        total = (
+            w_key * key_score
+            + w_bpm * bpm_score
+            + w_spec * spec_score
+            + w_rhythm * rhythm_score
+        )
+
+        return DoublingResult(
+            track_a=track_a_meta.get("title", track_a_meta.get("path", "?")),
+            track_b=track_b_meta.get("title", track_b_meta.get("path", "?")),
+            score=round(total, 3),
+            key_score=round(key_score, 3),
+            bpm_score=round(bpm_score, 3),
+            spectral_pocket_score=round(spec_score, 3),
+            rhythm_pocket_score=round(rhythm_score, 3),
+            verdict=_verdict_for(total),
+            needs_audio_analysis=not have_audio,
+        )
+
+    def score_pair(
+        self,
+        track_a_meta: dict,
+        track_b_meta: dict,
+        y_a: Optional[np.ndarray] = None,
+        y_b: Optional[np.ndarray] = None,
+        sr: Optional[int] = None,
+    ) -> DoublingResult:
+        """Score one pair. track_*_meta needs at least bpm / camelot_key / title.
+
+        If y_a/y_b/sr are provided the spectral + rhythm pockets are measured;
+        otherwise they fall back to a neutral default and needs_audio_analysis
+        is set True so callers know the estimate is key/bpm-only.
+        """
+        feat_a = feat_b = None
+        if y_a is not None and y_b is not None and sr is not None:
+            feat_a = extract_features(y_a, sr)
+            feat_b = extract_features(y_b, sr)
+        return self.score_features(track_a_meta, track_b_meta, feat_a, feat_b)
+
+    def load_features(
+        self,
+        meta: dict,
+        sr: Optional[int] = None,
+        remap: Optional[tuple[str, str]] = None,
+    ) -> Optional[TrackFeatures]:
+        """Load a drop excerpt and extract its features, tolerating bad files."""
+        path = _apply_path_remap(meta.get("path"), remap)
+        if not path or librosa is None:
+            return None
+        try:
+            y, used_sr = load_drop_section(path, sr=sr, offset_sec=meta.get("drop_offset_sec"))
+            return extract_features(y, used_sr)
+        except Exception as exc:  # noqa: BLE001 - one bad file shouldn't kill a batch
+            print(f"  ! audio analysis failed for {path}: {exc}", file=sys.stderr)
+            return None
+
+    def rank(
+        self,
+        tracks: list[dict],
+        top_n: int = 5,
+        use_audio: bool = False,
+        sr: Optional[int] = None,
+        remap: Optional[tuple[str, str]] = None,
+    ) -> list[dict]:
+        """Rank every track's top-N doubling partners as JSON-ready records.
+
+        Each record carries the source track's metadata plus a `candidates`
+        list where every entry merges the partner's metadata with the pair's
+        sub-scores — everything the web UI needs in one payload. When audio is
+        enabled, each track's features are extracted once (O(n)) and reused
+        across all pairings so the whole-library scan stays fast.
+        """
+        feats: list[Optional[TrackFeatures]] = [None] * len(tracks)
+        if use_audio:
+            for i, meta in enumerate(tracks):
+                feats[i] = self.load_features(meta, sr=sr, remap=remap)
+
+        records: list[dict] = []
+        for i, meta_a in enumerate(tracks):
+            candidates: list[dict] = []
+            for j, meta_b in enumerate(tracks):
+                if i == j:
+                    continue
+                res = self.score_features(meta_a, meta_b, feats[i], feats[j])
+                candidates.append(
+                    {
+                        "partner_index": j,
+                        "title": meta_b.get("title", f"track_{j}"),
+                        "artist": meta_b.get("artist"),
+                        "bpm": meta_b.get("bpm"),
+                        "camelot_key": meta_b.get("camelot_key"),
+                        "score": res.score,
+                        "key_score": res.key_score,
+                        "bpm_score": res.bpm_score,
+                        "spectral_pocket_score": res.spectral_pocket_score,
+                        "rhythm_pocket_score": res.rhythm_pocket_score,
+                        "verdict": res.verdict,
+                        "needs_audio_analysis": res.needs_audio_analysis,
+                    }
+                )
+            candidates.sort(key=lambda c: c["score"], reverse=True)
+            records.append(
+                {
+                    "index": i,
+                    "title": meta_a.get("title", f"track_{i}"),
+                    "artist": meta_a.get("artist"),
+                    "bpm": meta_a.get("bpm"),
+                    "camelot_key": meta_a.get("camelot_key"),
+                    "candidates": candidates[:top_n],
+                }
+            )
+        return records
+
+
+# Default engine (module-level weights). The standalone functions below delegate
+# to it so existing callers keep working unchanged.
+_DEFAULT_ENGINE = DoublingEngine()
+
+
 def score_doubling_pair(
     track_a_meta: dict,
     track_b_meta: dict,
@@ -474,57 +683,16 @@ def score_doubling_pair(
     y_b: Optional[np.ndarray] = None,
     sr: Optional[int] = None,
 ) -> DoublingResult:
-    """Main entry point. track_*_meta expected to contain at minimum:
-      { "path": str, "bpm": float, "camelot_key": str, "title": str }
-
-    If y_a/y_b/sr are provided the spectral + rhythm pockets are analyzed;
-    otherwise the result is a key/bpm-only estimate with needs_audio_analysis
-    set True so callers know the pockets were defaulted, not measured.
-    """
-    key_score = camelot_distance(track_a_meta.get("camelot_key"), track_b_meta.get("camelot_key"))
-    bpm_score = bpm_doubling_score(track_a_meta.get("bpm"), track_b_meta.get("bpm"))
-
-    have_audio = y_a is not None and y_b is not None and sr is not None
-    if have_audio:
-        spec_score = spectral_pocket_score(y_a, y_b, sr)
-        rhythm_score = rhythm_pocket_score(y_a, y_b, sr)
-    else:
-        spec_score = AUDIO_UNAVAILABLE_DEFAULT
-        rhythm_score = AUDIO_UNAVAILABLE_DEFAULT
-
-    total = (
-        WEIGHT_KEY * key_score
-        + WEIGHT_BPM * bpm_score
-        + WEIGHT_SPECTRAL_POCKET * spec_score
-        + WEIGHT_RHYTHM_POCKET * rhythm_score
-    )
-
-    return DoublingResult(
-        track_a=track_a_meta.get("title", track_a_meta.get("path", "?")),
-        track_b=track_b_meta.get("title", track_b_meta.get("path", "?")),
-        score=round(total, 3),
-        key_score=round(key_score, 3),
-        bpm_score=round(bpm_score, 3),
-        spectral_pocket_score=round(spec_score, 3),
-        rhythm_pocket_score=round(rhythm_score, 3),
-        verdict=_verdict_for(total),
-        needs_audio_analysis=not have_audio,
-    )
+    """Score a single pair with the default engine (see DoublingEngine.score_pair)."""
+    return _DEFAULT_ENGINE.score_pair(track_a_meta, track_b_meta, y_a, y_b, sr)
 
 
 # ---------------------------------------------------------------------------
 # Batch runner (mirrors the CLI pattern used in apply_review.py)
 # ---------------------------------------------------------------------------
-def _load_audio_for(meta: dict, sr: Optional[int]) -> Optional[tuple[np.ndarray, int]]:
-    """Load a drop excerpt for a track, tolerating missing files/librosa."""
-    path = meta.get("path")
-    if not path or librosa is None:
-        return None
-    try:
-        return load_drop_section(path, sr=sr, offset_sec=meta.get("drop_offset_sec"))
-    except Exception as exc:  # noqa: BLE001 - one bad file shouldn't kill a batch
-        print(f"  ! audio load failed for {path}: {exc}", file=sys.stderr)
-        return None
+def _load_audio_for(meta: dict, sr: Optional[int]) -> Optional[TrackFeatures]:
+    """Load + extract a track's audio features, tolerating missing files/librosa."""
+    return _DEFAULT_ENGINE.load_features(meta, sr=sr)
 
 
 def batch_top_candidates(
@@ -535,32 +703,26 @@ def batch_top_candidates(
 ) -> dict[str, list[DoublingResult]]:
     """For each track, return its top-N doubling partners sorted by score.
 
-    tracks: list of metadata dicts (see score_doubling_pair for required keys).
-    use_audio: when True, load a drop excerpt per track once and reuse it across
-    all pairings so scoring stays cheap over a large library.
+    Back-compatible view over DoublingEngine.rank(), keyed by track title and
+    returning DoublingResult objects (used by the CLI).
     """
-    loaded: list[Optional[tuple[np.ndarray, int]]] = [None] * len(tracks)
-    if use_audio:
-        for i, meta in enumerate(tracks):
-            loaded[i] = _load_audio_for(meta, sr)
-
     results: dict[str, list[DoublingResult]] = {}
-    for i, meta_a in enumerate(tracks):
-        pair_results: list[DoublingResult] = []
-        for j, meta_b in enumerate(tracks):
-            if i == j:
-                continue
-            ya = yb = s = None
-            if loaded[i] is not None and loaded[j] is not None:
-                ya, sa = loaded[i]
-                yb, sb = loaded[j]
-                s = sa if sa == sb else None  # sr must match to compare
-                if s is None:
-                    ya = yb = None
-            pair_results.append(score_doubling_pair(meta_a, meta_b, ya, yb, s))
-        pair_results.sort(key=lambda r: r.score, reverse=True)
-        key = meta_a.get("title", meta_a.get("path", f"track_{i}"))
-        results[key] = pair_results[:top_n]
+    for rec in _DEFAULT_ENGINE.rank(tracks, top_n=top_n, use_audio=use_audio, sr=sr):
+        src = tracks[rec["index"]]
+        results[rec["title"]] = [
+            DoublingResult(
+                track_a=rec["title"],
+                track_b=c["title"],
+                score=c["score"],
+                key_score=c["key_score"],
+                bpm_score=c["bpm_score"],
+                spectral_pocket_score=c["spectral_pocket_score"],
+                rhythm_pocket_score=c["rhythm_pocket_score"],
+                verdict=c["verdict"],
+                needs_audio_analysis=c["needs_audio_analysis"],
+            )
+            for c in rec["candidates"]
+        ]
     return results
 
 

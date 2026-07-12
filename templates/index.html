@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%E2%97%91</text></svg>" />
+  <title>Doubling Engine</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+      --text: #e7ebf0; --muted: #97a1b0; --accent: #6ea8fe; --accent-2: #8b7dff;
+      --good: #3fbf7f; --ok: #4b9cf5; --warn: #e0a94a; --bad: #e0575b;
+      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.25);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f4f6fa; --panel: #ffffff; --panel-2: #f0f3f8; --line: #dce2ec;
+        --text: #1a1f28; --muted: #5c6675; --shadow: 0 1px 2px rgba(20,30,50,.08), 0 8px 24px rgba(20,30,50,.08);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--text);
+    }
+    header {
+      padding: 20px 24px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+      background: linear-gradient(180deg, var(--panel), transparent);
+    }
+    header h1 { margin: 0; font-size: 19px; letter-spacing: .2px; }
+    header h1 .dot { color: var(--accent-2); }
+    header .sub { color: var(--muted); font-size: 13px; }
+    .layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; padding: 20px 24px; align-items: start; }
+    @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); }
+    .panel + .panel { margin-top: 16px; }
+    .panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+    input[type=file], input[type=text], input[type=number], select {
+      width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line);
+      background: var(--panel-2); color: var(--text); font-size: 13px;
+    }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--text); font-size: 13px; }
+    .check input { width: auto; }
+    button {
+      appearance: none; border: 0; border-radius: 10px; padding: 10px 14px; font-weight: 600;
+      font-size: 13px; cursor: pointer; background: var(--accent); color: #08131f; transition: filter .15s;
+    }
+    button:hover { filter: brightness(1.08); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+    .full { width: 100%; margin-top: 14px; }
+    .weights .wrow { display: grid; grid-template-columns: 80px 1fr 42px; align-items: center; gap: 10px; margin: 8px 0; }
+    .weights .wrow span:first-child { font-size: 12px; }
+    .weights .pct { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+    input[type=range] { width: 100%; accent-color: var(--accent-2); }
+    .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px; }
+    .stat b { font-variant-numeric: tabular-nums; }
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+    .toolbar input { max-width: 260px; }
+    .muted { color: var(--muted); }
+    .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+    .track { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; background: var(--panel); overflow: hidden; }
+    .track > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: center; gap: 12px; }
+    .track > summary::-webkit-details-marker { display: none; }
+    .track .caret { color: var(--muted); transition: transform .15s; }
+    .track[open] .caret { transform: rotate(90deg); }
+    .track .tname { font-weight: 600; }
+    .track .tmeta { color: var(--muted); font-size: 12px; margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .keychip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; font-variant-numeric: tabular-nums; }
+    .cands { padding: 4px 14px 12px; }
+    .cand { display: grid; grid-template-columns: 46px 1fr auto; gap: 12px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+    .scorebubble { font-weight: 700; font-size: 15px; text-align: center; font-variant-numeric: tabular-nums; }
+    .cand .who { min-width: 0; }
+    .cand .who .n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar { height: 5px; border-radius: 3px; background: var(--panel-2); margin-top: 5px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; border-radius: 3px; }
+    .subs { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .sub { font-size: 11px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
+    .sub.est { border-style: dashed; opacity: .8; }
+    .badge { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+    .b-good { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--good); }
+    .b-ok   { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+    .b-warn { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+    .b-bad  { background: color-mix(in srgb, var(--bad) 22%, transparent); color: var(--bad); }
+    .cand .actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+    .cand .actions button { padding: 5px 9px; font-size: 11px; }
+    .err { color: var(--bad); font-size: 12px; margin-top: 10px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Doubling <span class="dot">◑</span> Engine</h1>
+    <span class="sub">Find tracks that layer well — key · BPM · spectral pocket · rhythm pocket</span>
+  </header>
+
+  <div class="layout">
+    <!-- Controls -->
+    <div>
+      <div class="panel">
+        <h2>Library</h2>
+        <label>Rekordbox XML or JSON track list</label>
+        <input type="file" id="file" accept=".xml,.json" />
+        <div class="row" style="margin-top:10px">
+          <div>
+            <label>Format</label>
+            <select id="format">
+              <option value="auto">Auto-detect</option>
+              <option value="rekordbox">Rekordbox XML</option>
+              <option value="json">JSON list</option>
+            </select>
+          </div>
+        </div>
+        <div class="check"><input type="checkbox" id="skipMissing" /> <label style="margin:0">Skip tracks missing key/BPM</label></div>
+        <button class="full" id="uploadBtn">Load library</button>
+        <div id="uploadErr" class="err" hidden></div>
+        <div class="stats" id="stats" hidden></div>
+      </div>
+
+      <div class="panel weights">
+        <h2>Sub-score weights</h2>
+        <div id="weightRows"></div>
+        <p class="muted" style="font-size:12px;margin:4px 0 0">Percentages are normalized automatically.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Scoring</h2>
+        <div class="row">
+          <div>
+            <label>Top-N partners</label>
+            <input type="number" id="topN" value="5" min="1" max="50" />
+          </div>
+          <div>
+            <label>BPM tolerance %</label>
+            <input type="number" id="tol" value="2" min="0" max="10" step="0.5" />
+          </div>
+        </div>
+        <div class="check"><input type="checkbox" id="useAudio" /> <label style="margin:0">Analyze audio (spectral + rhythm) for whole library</label></div>
+        <p class="muted" style="font-size:12px;margin:6px 0 0">Needs the audio files present at their library paths. Slower — features are cached per track. Without it, scores use key/BPM only (deep-analyze any pair on demand).</p>
+        <label style="margin-top:14px">Path remap (optional) — replace a path prefix</label>
+        <div class="row">
+          <input type="text" id="remapFrom" placeholder="/Users/dj/Music" />
+          <input type="text" id="remapTo" placeholder="/mnt/library" />
+        </div>
+        <button class="full" id="rankBtn" disabled>Rank doubling candidates</button>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div class="panel" style="min-height:200px">
+      <div class="toolbar">
+        <input type="text" id="filter" placeholder="Filter tracks…" />
+        <span class="muted" id="resultMeta"></span>
+      </div>
+      <div id="results"><div class="empty">Load a library and hit <b>Rank</b> to see doubling candidates.</div></div>
+    </div>
+  </div>
+
+  <script>
+    const DEFAULTS = {{ defaults | tojson }};
+    const WEIGHTS = [
+      ["key", "Key"], ["bpm", "BPM"], ["spectral", "Spectral"], ["rhythm", "Rhythm"],
+    ];
+    const $ = (id) => document.getElementById(id);
+    let LIBRARY = [];        // uploaded track summaries
+    let RECORDS = [];        // last ranking
+
+    // --- Weight sliders ---
+    const weightState = {};
+    function buildWeights() {
+      const host = $("weightRows");
+      WEIGHTS.forEach(([k, label]) => {
+        weightState[k] = DEFAULTS[k];
+        const row = document.createElement("div");
+        row.className = "wrow";
+        row.innerHTML = `<span>${label}</span>
+          <input type="range" min="0" max="100" value="${Math.round(DEFAULTS[k]*100)}" data-k="${k}">
+          <span class="pct" id="pct-${k}"></span>`;
+        host.appendChild(row);
+        row.querySelector("input").addEventListener("input", (e) => {
+          weightState[k] = (+e.target.value) / 100;
+          renderPct();
+        });
+      });
+      renderPct();
+    }
+    function renderPct() {
+      const sum = WEIGHTS.reduce((a, [k]) => a + weightState[k], 0) || 1;
+      WEIGHTS.forEach(([k]) => { $(`pct-${k}`).textContent = Math.round(weightState[k] / sum * 100) + "%"; });
+    }
+
+    function payloadBase() {
+      return {
+        weights: { ...weightState },
+        tolerance_pct: +$("tol").value || 2,
+        top_n: +$("topN").value || 5,
+        remap: { from: $("remapFrom").value, to: $("remapTo").value },
+      };
+    }
+
+    // --- Upload ---
+    $("uploadBtn").addEventListener("click", async () => {
+      const f = $("file").files[0];
+      const err = $("uploadErr");
+      err.hidden = true;
+      if (!f) { err.textContent = "Choose a file first."; err.hidden = false; return; }
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("format", $("format").value);
+      fd.append("skip_missing", $("skipMissing").checked ? "1" : "0");
+      $("uploadBtn").disabled = true; $("uploadBtn").textContent = "Loading…";
+      try {
+        const r = await fetch("/api/upload", { method: "POST", body: fd });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Upload failed");
+        LIBRARY = d.tracks;
+        $("stats").hidden = false;
+        $("stats").innerHTML = `
+          <div class="stat"><b>${d.count}</b> tracks</div>
+          <div class="stat"><b>${d.with_key}</b> with key</div>
+          <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
+          <div class="stat"><b>${d.with_path}</b> with audio path</div>`;
+        $("rankBtn").disabled = false;
+      } catch (e) {
+        err.textContent = e.message; err.hidden = false;
+      } finally {
+        $("uploadBtn").disabled = false; $("uploadBtn").textContent = "Load library";
+      }
+    });
+
+    // --- Rank ---
+    $("rankBtn").addEventListener("click", async () => {
+      const btn = $("rankBtn");
+      btn.disabled = true;
+      const useAudio = $("useAudio").checked;
+      btn.innerHTML = useAudio ? 'Analyzing audio… <span class="spinner"></span>' : "Ranking…";
+      try {
+        const body = { ...payloadBase(), use_audio: useAudio };
+        const r = await fetch("/api/rank", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Ranking failed");
+        RECORDS = d.records;
+        $("resultMeta").textContent = `${d.count} tracks · ${useAudio ? "full audio analysis" : "key/BPM only"}`;
+        renderResults();
+      } catch (e) {
+        $("results").innerHTML = `<div class="err">${e.message}</div>`;
+      } finally {
+        btn.disabled = false; btn.textContent = "Rank doubling candidates";
+      }
+    });
+
+    // --- Rendering ---
+    function badgeClass(v) {
+      if (v.startsWith("strong")) return "b-good";
+      if (v.startsWith("worth")) return "b-ok";
+      if (v.startsWith("risky")) return "b-warn";
+      return "b-bad";
+    }
+    function scoreColor(s) {
+      if (s >= 0.8) return "var(--good)";
+      if (s >= 0.6) return "var(--ok)";
+      if (s >= 0.4) return "var(--warn)";
+      return "var(--bad)";
+    }
+    const fmt = (x) => (x == null ? "—" : (+x).toFixed(x >= 1 ? 0 : 2).replace(/^0/, ""));
+    const bpmFmt = (x) => (x == null ? "—" : (+x).toFixed(0));
+
+    function candRow(rec, c) {
+      const col = scoreColor(c.score);
+      const subs = [
+        ["key", c.key_score, false],
+        ["bpm", c.bpm_score, false],
+        ["spec", c.spectral_pocket_score, c.needs_audio_analysis],
+        ["rhy", c.rhythm_pocket_score, c.needs_audio_analysis],
+      ].map(([n, v, est]) => `<span class="sub ${est ? "est" : ""}">${n} ${fmt(v)}</span>`).join("");
+      const analyzeBtn = c.needs_audio_analysis
+        ? `<button class="ghost" data-i="${rec.index}" data-j="${c.partner_index}">Analyze audio</button>` : "";
+      return `<div class="cand" data-cand="${rec.index}-${c.partner_index}">
+        <div class="scorebubble" style="color:${col}">${c.score.toFixed(2)}</div>
+        <div class="who">
+          <div class="n">${esc(c.title)} <span class="keychip">${c.camelot_key || "?"}</span> <span class="muted">${bpmFmt(c.bpm)}</span></div>
+          <div class="bar"><i style="width:${Math.round(c.score*100)}%;background:${col}"></i></div>
+          <div class="subs">${subs}</div>
+        </div>
+        <div class="actions">
+          <span class="badge ${badgeClass(c.verdict)}">${esc(c.verdict)}</span>
+          ${analyzeBtn}
+        </div>
+      </div>`;
+    }
+
+    function renderResults() {
+      const q = $("filter").value.trim().toLowerCase();
+      const host = $("results");
+      const recs = RECORDS.filter(r => !q || (r.title || "").toLowerCase().includes(q));
+      if (!recs.length) { host.innerHTML = `<div class="empty">No tracks match.</div>`; return; }
+      host.innerHTML = recs.map((rec, idx) => `
+        <details class="track" ${idx < 3 ? "open" : ""}>
+          <summary>
+            <span class="caret">▶</span>
+            <span class="tname">${esc(rec.title)}</span>
+            <span class="tmeta">
+              <span class="keychip">${rec.camelot_key || "?"}</span>
+              <span>${bpmFmt(rec.bpm)} BPM</span>
+              <span>${rec.candidates.length} matches</span>
+            </span>
+          </summary>
+          <div class="cands">${rec.candidates.map(c => candRow(rec, c)).join("")}</div>
+        </details>`).join("");
+      host.querySelectorAll("button[data-i]").forEach(b => b.addEventListener("click", onAnalyze));
+    }
+
+    async function onAnalyze(e) {
+      const btn = e.currentTarget;
+      const i = +btn.dataset.i, j = +btn.dataset.j;
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+      try {
+        const body = { ...payloadBase(), i, j };
+        const r = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Analyze failed");
+        // patch the record + re-render this row
+        const rec = RECORDS.find(x => x.index === i);
+        const c = rec.candidates.find(x => x.partner_index === j);
+        Object.assign(c, {
+          score: d.result.score, key_score: d.result.key_score, bpm_score: d.result.bpm_score,
+          spectral_pocket_score: d.result.spectral_pocket_score, rhythm_pocket_score: d.result.rhythm_pocket_score,
+          verdict: d.result.verdict, needs_audio_analysis: d.result.needs_audio_analysis,
+        });
+        const rowEl = document.querySelector(`[data-cand="${i}-${j}"]`);
+        rowEl.outerHTML = candRow(rec, c);
+        const newBtn = document.querySelector(`[data-cand="${i}-${j}"] button[data-i]`);
+        if (newBtn) newBtn.addEventListener("click", onAnalyze);
+        if (d.missing_audio && d.missing_audio.length) {
+          const el = document.querySelector(`[data-cand="${i}-${j}"] .actions`);
+          el.insertAdjacentHTML("beforeend", `<span class="sub est" title="couldn't load audio">no audio</span>`);
+        }
+      } catch (err) {
+        btn.disabled = false; btn.textContent = "Retry";
+        alert(err.message);
+      }
+    }
+
+    function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m])); }
+    $("filter").addEventListener("input", renderResults);
+
+    buildWeights();
+  </script>
+</body>
+</html>
