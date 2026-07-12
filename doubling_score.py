@@ -19,8 +19,9 @@ When audio is available the module analyzes a ~16-bar drop excerpt (either the
 loudest window it finds, or an explicit section boundary passed in) rather than
 whole tracks, to keep batch scoring fast across a large library.
 
-CLI:
+CLI (input can be a JSON list of track dicts, or a rekordbox library XML export):
   python doubling_score.py tracks.json --top 3 --audio
+  python doubling_score.py rekordbox.xml --top 3 --skip-missing
 See _build_arg_parser() / main() for the batch-runner contract.
 """
 
@@ -28,9 +29,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from typing import Optional
+from urllib.parse import unquote
 
 import numpy as np
 
@@ -132,6 +136,76 @@ def _wheel_step(a: int, b: int) -> int:
     return min(diff, 12 - diff)
 
 
+# Pitch class (0-11) for every note spelling we expect to see. Flats are written
+# as "<letter>B" because musical_key_to_camelot() rewrites the '♭' symbol to 'B'.
+_PITCH_CLASS = {
+    "C": 0, "B#": 0,
+    "C#": 1, "DB": 1,
+    "D": 2,
+    "D#": 3, "EB": 3,
+    "E": 4, "FB": 4,
+    "F": 5, "E#": 5,
+    "F#": 6, "GB": 6,
+    "G": 7,
+    "G#": 8, "AB": 8,
+    "A": 9,
+    "A#": 10, "BB": 10,
+    "B": 11, "CB": 11,
+}
+# Camelot code per pitch class, derived from the wheel of fifths (each fifth up
+# advances the Camelot number by one). Major = "B" ring, minor = "A" ring.
+_MAJOR_CAMELOT = {
+    0: "8B", 1: "3B", 2: "10B", 3: "5B", 4: "12B", 5: "7B",
+    6: "2B", 7: "9B", 8: "4B", 9: "11B", 10: "6B", 11: "1B",
+}
+_MINOR_CAMELOT = {
+    9: "8A", 4: "9A", 11: "10A", 6: "11A", 1: "12A", 8: "1A",
+    3: "2A", 10: "3A", 5: "4A", 0: "5A", 7: "6A", 2: "7A",
+}
+
+
+def musical_key_to_camelot(key: Optional[str]) -> Optional[str]:
+    """Normalize a key string to a Camelot code ('8A' / '12B').
+
+    Accepts Camelot codes directly ('8A', '12B') and the musical notations
+    rekordbox exports in its Tonality field: 'Am', 'C', 'F#m', 'Dbm', 'Ab',
+    'A minor', 'C major', etc. (case-insensitive, '♯'/'♭' symbols accepted).
+    Returns None if the key can't be recognized.
+    """
+    if not key:
+        return None
+    s = str(key).strip().upper()
+    if not s:
+        return None
+
+    # Already a Camelot code?
+    parsed = _parse_camelot(s)
+    if parsed is not None:
+        num, letter = parsed
+        return f"{num}{letter}"
+
+    # Normalize accidental symbols to their ASCII spellings ('D♭' -> 'DB').
+    s = s.replace("♯", "#").replace("♭", "B")
+
+    # Determine mode: default major; strip an explicit minor/major suffix.
+    is_minor = False
+    for suf in ("MINOR", "MIN", "M"):
+        if s.endswith(suf):
+            is_minor = True
+            s = s[: -len(suf)]
+            break
+    else:
+        for suf in ("MAJOR", "MAJ"):
+            if s.endswith(suf):
+                s = s[: -len(suf)]
+                break
+
+    pitch_class = _PITCH_CLASS.get(s.strip())
+    if pitch_class is None:
+        return None
+    return _MINOR_CAMELOT[pitch_class] if is_minor else _MAJOR_CAMELOT[pitch_class]
+
+
 def camelot_distance(key_a: str, key_b: str) -> float:
     """Score harmonic compatibility for DOUBLING (stricter than sequential mixing).
 
@@ -145,8 +219,11 @@ def camelot_distance(key_a: str, key_b: str) -> float:
       energy-boost (+7 same letter)         -> 0.5
       anything else                         -> 0.1
     """
-    a = _parse_camelot(key_a)
-    b = _parse_camelot(key_b)
+    # Accept both Camelot codes and musical notation ('Am', 'C', 'F#m', ...).
+    code_a = musical_key_to_camelot(key_a)
+    code_b = musical_key_to_camelot(key_b)
+    a = _parse_camelot(code_a) if code_a else None
+    b = _parse_camelot(code_b) if code_b else None
     if a is None or b is None:
         # Unknown/unparseable key — treat as a likely clash rather than crashing
         # a batch run. Same conservative floor as an unrelated key.
@@ -404,8 +481,8 @@ def score_doubling_pair(
     otherwise the result is a key/bpm-only estimate with needs_audio_analysis
     set True so callers know the pockets were defaulted, not measured.
     """
-    key_score = camelot_distance(track_a_meta["camelot_key"], track_b_meta["camelot_key"])
-    bpm_score = bpm_doubling_score(track_a_meta["bpm"], track_b_meta["bpm"])
+    key_score = camelot_distance(track_a_meta.get("camelot_key"), track_b_meta.get("camelot_key"))
+    bpm_score = bpm_doubling_score(track_a_meta.get("bpm"), track_b_meta.get("bpm"))
 
     have_audio = y_a is not None and y_b is not None and sr is not None
     if have_audio:
@@ -487,14 +564,127 @@ def batch_top_candidates(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Input loading (JSON track list or rekordbox library XML)
+# ---------------------------------------------------------------------------
+def _rekordbox_location_to_path(location: Optional[str]) -> Optional[str]:
+    """Decode a rekordbox Location attribute into a filesystem path.
+
+    Locations look like 'file://localhost/Users/dj/Music/track.mp3' and are
+    URL-encoded; on Windows they carry a drive letter ('/C:/...').
+    """
+    if not location:
+        return None
+    p = unquote(location)
+    if p.startswith("file://"):
+        p = p[len("file://"):]
+        if p.startswith("localhost"):
+            p = p[len("localhost"):]
+    if re.match(r"^/[A-Za-z]:/", p):  # '/C:/Music' -> 'C:/Music'
+        p = p[1:]
+    return p
+
+
+def load_rekordbox_xml(
+    path: str,
+    *,
+    skip_missing_bpm: bool = False,
+    skip_missing_key: bool = False,
+) -> list[dict]:
+    """Parse a rekordbox exported library XML into track metadata dicts
+    compatible with score_doubling_pair() / batch_top_candidates().
+
+    rekordbox stores tempo in the TRACK AverageBpm attribute and key in
+    Tonality (musical notation, converted here to Camelot). File paths come
+    from the URL-encoded Location attribute. Set skip_missing_* to drop tracks
+    that lack a usable BPM or key rather than scoring them on partial data.
+    """
+    collection = ET.parse(path).getroot().find("COLLECTION")
+    if collection is None:
+        raise ValueError(f"{path}: no <COLLECTION> element (not a rekordbox library XML?)")
+
+    tracks: list[dict] = []
+    for tr in collection.findall("TRACK"):
+        name = tr.get("Name") or ""
+        artist = tr.get("Artist") or ""
+        title = f"{artist} - {name}".strip(" -") if artist else name
+
+        bpm_raw = tr.get("AverageBpm")
+        try:
+            bpm = float(bpm_raw) if bpm_raw else None
+        except ValueError:
+            bpm = None
+
+        camelot = musical_key_to_camelot(tr.get("Tonality"))
+
+        if skip_missing_bpm and not bpm:
+            continue
+        if skip_missing_key and not camelot:
+            continue
+
+        tracks.append(
+            {
+                "title": title or tr.get("TrackID") or "?",
+                "artist": artist,
+                "name": name,
+                "path": _rekordbox_location_to_path(tr.get("Location")),
+                "bpm": bpm,
+                "camelot_key": camelot,
+                "track_id": tr.get("TrackID"),
+            }
+        )
+    return tracks
+
+
+def load_tracks(path: str, fmt: str = "auto", skip_missing: bool = False) -> list[dict]:
+    """Load track metadata from a JSON list or a rekordbox XML export.
+
+    fmt: 'json', 'rekordbox', or 'auto' (detect by extension, then by sniffing
+    whether the file starts with '<').
+    """
+    if fmt == "auto":
+        lower = path.lower()
+        if lower.endswith(".xml"):
+            fmt = "rekordbox"
+        elif lower.endswith(".json"):
+            fmt = "json"
+        else:
+            with open(path) as fh:
+                fmt = "rekordbox" if fh.read(256).lstrip().startswith("<") else "json"
+
+    if fmt == "rekordbox":
+        return load_rekordbox_xml(path, skip_missing_bpm=skip_missing, skip_missing_key=skip_missing)
+
+    with open(path) as fh:
+        data = json.load(fh)
+    if not isinstance(data, list):
+        raise ValueError("JSON track file must contain a list of metadata dicts.")
+    if skip_missing:
+        data = [t for t in data if t.get("bpm") and t.get("camelot_key")]
+    return data
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Rank doubling (simultaneous-drop) candidates for a track library."
     )
     parser.add_argument(
-        "tracks_json",
-        help="Path to a JSON file: a list of track metadata dicts "
-        '({"title","path","bpm","camelot_key"[, "drop_offset_sec"]}).',
+        "tracks_file",
+        help="A JSON file (list of track metadata dicts with "
+        '"title"/"path"/"bpm"/"camelot_key"[/"drop_offset_sec"]) '
+        "or a rekordbox library XML export.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("auto", "json", "rekordbox"),
+        default="auto",
+        dest="fmt",
+        help="Input format (default: auto-detect by extension/content).",
+    )
+    parser.add_argument(
+        "--skip-missing",
+        action="store_true",
+        help="Drop tracks that lack a usable BPM or key instead of scoring them.",
     )
     parser.add_argument("--top", type=int, default=5, help="Top-N partners per track.")
     parser.add_argument(
@@ -515,10 +705,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_arg_parser().parse_args(argv)
 
-    with open(args.tracks_json) as fh:
-        tracks = json.load(fh)
-    if not isinstance(tracks, list):
-        print("tracks_json must contain a JSON list of track metadata.", file=sys.stderr)
+    try:
+        tracks = load_tracks(args.tracks_file, fmt=args.fmt, skip_missing=args.skip_missing)
+    except (OSError, ValueError, json.JSONDecodeError, ET.ParseError) as exc:
+        print(f"Failed to load tracks from {args.tracks_file}: {exc}", file=sys.stderr)
         return 2
 
     results = batch_top_candidates(tracks, top_n=args.top, use_audio=args.audio, sr=args.sr)
