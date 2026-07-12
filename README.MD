@@ -1,3 +1,41 @@
+# Doubling Compatibility Engine
+
+`doubling_score.py` scores how well two tracks **double** — i.e. play their drops
+layered simultaneously (common in riddim/bass DJ sets) rather than mixed
+sequentially. It blends four normalized sub-scores:
+
+- **Key** (`camelot_distance`) — strict harmonic fit; clashes are loud when stacked.
+- **BPM** (`bpm_doubling_score`) — near-identical or a clean 2×/½× half-time fit.
+- **Spectral pocket** (`spectral_pocket_score`) — do the two drops leave each other
+  frequency-band headroom, or fight for the sub/bass? (bass-band weighted heaviest)
+- **Rhythm pocket** (`rhythm_pocket_score`) — do their transients interleave, or pile up?
+
+The reusable core is `DoublingEngine` (tunable weights + `rank()`). Input can be a
+JSON track list or a **rekordbox library XML export** (`AverageBpm` → BPM,
+`Tonality` → Camelot key via `musical_key_to_camelot`, `Location` → file path).
+
+## Web app
+
+A local Flask front end (`app.py` + `templates/index.html`) makes it usable
+without the CLI: upload a rekordbox XML (or JSON), tune the sub-score weights
+live, and browse each track's top doubling partners. Run the full audio
+"pocket" analysis across the whole library, or deep-analyze a single pair on
+demand.
+
+```bash
+pip install -r requirements.txt
+python app.py            # open http://127.0.0.1:5000
+```
+
+## CLI
+
+```bash
+python doubling_score.py rekordbox.xml --top 3 --skip-missing
+python doubling_score.py tracks.json --top 3 --audio --json
+```
+
+---
+
 # Festival Lineup Scraper
 
 This project is a Python-based tool designed to scrape festival lineup posters from web pages, extract artist names using Optical Character Recognition (OCR), and enrich the data with genre information. The tool is modular and can be customized for various use cases.
