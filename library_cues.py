@@ -258,6 +258,37 @@ def analyze_file(path: str, sr: int = _ANALYSIS_SR) -> dict:
     }
 
 
+def add_cues(meta: dict, sr: int = _ANALYSIS_SR) -> dict:
+    """Detect + attach cues to an existing track dict (e.g. a Rekordbox track).
+
+    Keeps the track's existing BPM/key (Rekordbox's own analysis) and only fills
+    them in if missing; adds cues, duration and first_beat_sec for the beatgrid.
+    """
+    if librosa is None:
+        raise ImportError("librosa is required for cue detection.")
+    path = meta.get("path")
+    if not path or not os.path.isfile(path):
+        return {**meta, "cues": meta.get("cues", [])}
+
+    y, used_sr = librosa.load(path, sr=sr, mono=True)
+    start_bpm = float(meta["bpm"]) if meta.get("bpm") else 150.0
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=used_sr, start_bpm=start_bpm, units="frames")
+    beat_times = librosa.frames_to_time(beat_frames, sr=used_sr)
+
+    out = {**meta}
+    out["cues"] = detect_cue_points(y, used_sr, beat_times)
+    out["duration_sec"] = round(len(y) / used_sr, 2)
+    out["first_beat_sec"] = round(float(beat_times[0]), 3) if len(beat_times) else 0.0
+    if not out.get("bpm"):
+        out["bpm"] = round(_normalize_bpm(float(np.atleast_1d(tempo)[0])), 2)
+    if not out.get("camelot_key"):
+        try:
+            out["camelot_key"] = detect_key(y, used_sr)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def waveform_peaks(path: str, buckets: int = 1000, sr: int = 11025) -> tuple[list[float], float]:
     """Downsampled |amplitude| peaks (0-1) + duration, for drawing a waveform.
 

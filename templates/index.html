@@ -163,6 +163,8 @@
         </div>
         <div class="check"><input type="checkbox" id="skipMissing" /> <label style="margin:0">Skip tracks missing key/BPM</label></div>
         <button class="full" id="uploadBtn">Load library</button>
+        <button class="full" id="autocueAllBtn" style="margin-top:8px">⚡ Auto-cue whole library</button>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">One click: loads your Rekordbox XML and auto-detects drop / mix-in / mix-out cues for every local track (streaming tracks skipped). Then preview/edit and download the cue XML. Big libraries take a while.</p>
         <div id="uploadErr" class="err" hidden></div>
         <div class="stats" id="stats" hidden></div>
       </div>
@@ -285,25 +287,53 @@
     }
 
     // --- Upload ---
-    $("uploadBtn").addEventListener("click", async () => {
+    async function uploadCurrentFile() {
       const f = $("file").files[0];
-      const err = $("uploadErr");
-      err.hidden = true;
-      if (!f) { err.textContent = "Choose a file first."; err.hidden = false; return; }
+      if (!f) throw new Error("Choose your Rekordbox XML (or JSON) first.");
       const fd = new FormData();
       fd.append("file", f);
       fd.append("format", $("format").value);
       fd.append("skip_missing", $("skipMissing").checked ? "1" : "0");
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Upload failed");
+      return d;
+    }
+
+    $("uploadBtn").addEventListener("click", async () => {
+      const err = $("uploadErr"); err.hidden = true;
       $("uploadBtn").disabled = true; $("uploadBtn").textContent = "Loading…";
       try {
-        const r = await fetch("/api/upload", { method: "POST", body: fd });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || "Upload failed");
-        onLibraryLoaded(d, false);
+        onLibraryLoaded(await uploadCurrentFile(), false);
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
       } finally {
         $("uploadBtn").disabled = false; $("uploadBtn").textContent = "Load library";
+      }
+    });
+
+    // --- One-click: load (if needed) + auto-cue the whole library ---
+    $("autocueAllBtn").addEventListener("click", async () => {
+      const err = $("uploadErr"); err.hidden = true;
+      const btn = $("autocueAllBtn"); btn.disabled = true;
+      btn.innerHTML = 'Working… <span class="spinner"></span>';
+      try {
+        // If a file is chosen (and not yet the loaded library), load it first.
+        if ($("file").files[0]) { await uploadCurrentFile(); }
+        else if (!LIBRARY.length) { throw new Error("Choose your Rekordbox XML first, or Load library."); }
+        btn.innerHTML = 'Auto-cueing every track… <span class="spinner"></span>';
+        const r = await fetch("/api/autocue", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ remap: payloadBase().remap }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Auto-cue failed");
+        onLibraryLoaded(d, true);
+        if (d.failed && d.failed.length) { err.textContent = `${d.failed.length} track(s) couldn't be analyzed (missing/unreadable files).`; err.hidden = false; }
+      } catch (e) {
+        err.textContent = e.message; err.hidden = false;
+      } finally {
+        btn.disabled = false; btn.innerHTML = "⚡ Auto-cue whole library";
       }
     });
 

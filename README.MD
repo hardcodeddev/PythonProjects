@@ -31,6 +31,14 @@ appear in the results panel with their detected cues, ready to preview/edit —
 then **Download Rekordbox XML (cues)**. (Ranking for doubling matches is a
 separate, optional step.)
 
+### One-click: auto-cue a whole Rekordbox library
+
+Choose your Rekordbox XML and hit **⚡ Auto-cue whole library** — it loads the
+library and detects drop / mix-in / mix-out cues for every local track in one
+go (keeping Rekordbox's own BPM/key; streaming tracks are skipped), then shows
+them ready to preview/edit and export. Backed by `DoublingEngine`-adjacent
+`library_cues.add_cues` and the `/api/autocue` endpoint.
+
 ### Preview & edit cues
 
 Each local track has a **Preview / edit cues** panel: a waveform with the cue

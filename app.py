@@ -36,6 +36,22 @@ _TRUE = {"1", "true", "on", "yes", "True"}
 _SUMMARY_FIELDS = ("title", "artist", "bpm", "camelot_key", "path", "streaming")
 
 
+def _library_response(tracks: list[dict], **extra) -> dict:
+    """The library summary payload the front end expects (upload/scan/autocue)."""
+    payload = dict(
+        source=STATE.get("source"),
+        count=len(tracks),
+        with_key=sum(1 for t in tracks if t.get("camelot_key")),
+        with_bpm=sum(1 for t in tracks if t.get("bpm")),
+        with_path=sum(1 for t in tracks if t.get("path")),
+        streaming=sum(1 for t in tracks if t.get("streaming")),
+        total_cues=sum(len(t.get("cues", [])) for t in tracks),
+        tracks=[{**{k: t.get(k) for k in _SUMMARY_FIELDS}, "cues": t.get("cues", [])} for t in tracks],
+    )
+    payload.update(extra)
+    return payload
+
+
 def _engine_from(payload: dict) -> ds.DoublingEngine:
     """Build an engine from the request's weight/tolerance config."""
     w = payload.get("weights") or {}
@@ -104,15 +120,7 @@ def upload():
 
     STATE["tracks"] = tracks
     STATE["source"] = file.filename
-    return jsonify(
-        source=file.filename,
-        count=len(tracks),
-        with_key=sum(1 for t in tracks if t.get("camelot_key")),
-        with_bpm=sum(1 for t in tracks if t.get("bpm")),
-        with_path=sum(1 for t in tracks if t.get("path")),
-        streaming=sum(1 for t in tracks if t.get("streaming")),
-        tracks=[{k: t.get(k) for k in _SUMMARY_FIELDS} for t in tracks],
-    )
+    return jsonify(_library_response(tracks))
 
 
 @app.post("/api/rank")
@@ -250,19 +258,34 @@ def scan():
     STATE["tracks"] = tracks
     STATE["source"] = f"{len(folders)} folder(s)"
     failed = [t["title"] for t in tracks if t.get("error")]
-    return jsonify(
-        source=STATE["source"],
-        count=len(tracks),
-        with_key=sum(1 for t in tracks if t.get("camelot_key")),
-        with_bpm=sum(1 for t in tracks if t.get("bpm")),
-        with_path=sum(1 for t in tracks if t.get("path")),
-        total_cues=sum(len(t.get("cues", [])) for t in tracks),
-        failed=failed,
-        tracks=[
-            {**{k: t.get(k) for k in _SUMMARY_FIELDS}, "cues": t.get("cues", [])}
-            for t in tracks
-        ],
-    )
+    return jsonify(_library_response(tracks, failed=failed))
+
+
+@app.post("/api/autocue")
+def autocue():
+    """One-click: detect + attach cues to every local track in the loaded library.
+
+    Keeps each track's existing BPM/key (e.g. Rekordbox's own analysis). Streaming
+    and non-local tracks are left untouched.
+    """
+    tracks = STATE["tracks"]
+    if not tracks:
+        return jsonify(error="Load a library first (upload a Rekordbox XML)."), 400
+    remap = _remap_from(request.get_json(force=True, silent=True) or {})
+
+    updated, failed = [], []
+    for t in tracks:
+        path = ds._apply_path_remap(t.get("path"), remap)
+        if path and not t.get("streaming") and ds._is_local_path(path) and os.path.isfile(path):
+            try:
+                updated.append(lc.add_cues({**t, "path": path}))
+                continue
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{t.get('title', '?')}: {exc}")
+        updated.append({**t, "cues": t.get("cues", [])})
+
+    STATE["tracks"] = updated
+    return jsonify(_library_response(updated, failed=failed))
 
 
 def _local_track_or_404(index: int) -> dict:
