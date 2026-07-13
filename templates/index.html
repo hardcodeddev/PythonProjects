@@ -37,9 +37,9 @@
     .panel + .panel { margin-top: 16px; }
     .panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
     label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
-    input[type=file], input[type=text], input[type=number], select {
+    input[type=file], input[type=text], input[type=number], select, textarea {
       width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line);
-      background: var(--panel-2); color: var(--text); font-size: 13px;
+      background: var(--panel-2); color: var(--text); font-size: 13px; font-family: inherit; resize: vertical;
     }
     .row { display: flex; gap: 8px; }
     .row > * { flex: 1; }
@@ -95,6 +95,23 @@
     .cuepanel li { margin: 3px 0; }
     .cuepanel .drops { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .cuepanel .drops .sub { background: var(--panel); }
+    .cuestrip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 0 2px; }
+    .cuestrip .cuehead { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; }
+    .sub.cue-drop { border-color: var(--bad); color: var(--bad); }
+    .sub.cue-mix_in { border-color: var(--good); color: var(--good); }
+    .sub.cue-mix_out { border-color: var(--ok); color: var(--ok); }
+    .editor { margin: 6px 0 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+    .editor canvas { width: 100%; height: 96px; display: block; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); cursor: crosshair; touch-action: none; }
+    .editor .transport { display: flex; align-items: center; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+    .editor .transport .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+    .editor .cuelist { display: flex; flex-direction: column; gap: 6px; }
+    .editor .cuerow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .editor .cuerow .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+    .editor .cuerow input.nm { width: 90px; padding: 4px 6px; font-size: 12px; }
+    .editor .cuerow .t { font-variant-numeric: tabular-nums; font-size: 12px; min-width: 62px; color: var(--muted); }
+    .editor .cuerow button { padding: 4px 8px; font-size: 11px; }
+    .editor .editactions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .editor .hint { color: var(--muted); font-size: 11px; margin: 8px 0 0; }
     .err { color: var(--bad); font-size: 12px; margin-top: 10px; }
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -127,6 +144,17 @@
         <button class="full" id="uploadBtn">Load library</button>
         <div id="uploadErr" class="err" hidden></div>
         <div class="stats" id="stats" hidden></div>
+      </div>
+
+      <div class="panel">
+        <h2>Scan music folders</h2>
+        <label>Folder path(s) on this machine — one per line</label>
+        <textarea id="folders" rows="3" placeholder="/Users/you/Music/Bass&#10;/Volumes/USB/Sets"></textarea>
+        <div class="check"><input type="checkbox" id="recursive" checked /> <label style="margin:0">Include subfolders</label></div>
+        <button class="full" id="scanBtn">Scan &amp; auto-cue</button>
+        <div id="scanErr" class="err" hidden></div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">Detects BPM, key and drop / mix-in / mix-out cues from the audio. Runs on this machine; large folders take a while. Then download a Rekordbox XML to import the cues.</p>
+        <button class="ghost full" id="exportBtn" hidden style="margin-top:10px">⬇ Download Rekordbox XML (cues)</button>
       </div>
 
       <div class="panel weights">
@@ -227,21 +255,50 @@
         const r = await fetch("/api/upload", { method: "POST", body: fd });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Upload failed");
-        LIBRARY = d.tracks;
-        $("stats").hidden = false;
-        $("stats").innerHTML = `
-          <div class="stat"><b>${d.count}</b> tracks</div>
-          <div class="stat"><b>${d.with_key}</b> with key</div>
-          <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
-          <div class="stat"><b>${d.with_path}</b> with audio file</div>
-          ${d.streaming ? `<div class="stat"><b>${d.streaming}</b> streaming</div>` : ""}`;
-        $("rankBtn").disabled = false;
+        onLibraryLoaded(d);
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
       } finally {
         $("uploadBtn").disabled = false; $("uploadBtn").textContent = "Load library";
       }
     });
+
+    // Shared handling once a library is available (from upload or folder scan).
+    function onLibraryLoaded(d) {
+      LIBRARY = d.tracks;
+      $("stats").hidden = false;
+      $("stats").innerHTML = `
+        <div class="stat"><b>${d.count}</b> tracks</div>
+        <div class="stat"><b>${d.with_key}</b> with key</div>
+        <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
+        <div class="stat"><b>${d.with_path}</b> with audio file</div>
+        ${d.streaming ? `<div class="stat"><b>${d.streaming}</b> streaming</div>` : ""}
+        ${d.total_cues ? `<div class="stat"><b>${d.total_cues}</b> cues detected</div>` : ""}`;
+      $("rankBtn").disabled = false;
+      $("exportBtn").hidden = !d.total_cues;
+    }
+
+    // Scan folders -> detect BPM/key/cues.
+    $("scanBtn").addEventListener("click", async () => {
+      const err = $("scanErr"); err.hidden = true;
+      const folders = $("folders").value;
+      if (!folders.trim()) { err.textContent = "Enter a folder path."; err.hidden = false; return; }
+      const btn = $("scanBtn"); btn.disabled = true; btn.innerHTML = 'Scanning & analyzing… <span class="spinner"></span>';
+      try {
+        const body = { folders, recursive: $("recursive").checked };
+        const r = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Scan failed");
+        onLibraryLoaded(d);
+        if (d.failed && d.failed.length) { err.textContent = `${d.failed.length} file(s) could not be analyzed.`; err.hidden = false; }
+      } catch (e) {
+        err.textContent = e.message; err.hidden = false;
+      } finally {
+        btn.disabled = false; btn.textContent = "Scan & auto-cue";
+      }
+    });
+
+    $("exportBtn").addEventListener("click", () => { window.location = "/api/export.xml"; });
 
     // --- Rank ---
     $("rankBtn").addEventListener("click", async () => {
@@ -339,8 +396,199 @@
               <span>${rec.candidates.length} matches</span>
             </span>
           </summary>
-          <div class="cands">${rec.candidates.map(c => candRow(rec, c)).join("")}</div>
+          <div class="cands">${cueStrip(rec)}${rec.candidates.map(c => candRow(rec, c)).join("")}</div>
         </details>`).join("");
+    }
+
+    // Detected hot cues for a scanned track (from the library, by original index).
+    function cueStripInner(index, hasAudio) {
+      const cues = (LIBRARY[index] && LIBRARY[index].cues) || [];
+      const chips = cues.map(c => `<span class="sub cue-${esc(c.kind)}">${esc(c.name)} ${mmss(c.start_sec)}</span>`).join("");
+      const editBtn = hasAudio ? `<button class="ghost" data-action="edit" data-i="${index}">▶ Preview / edit cues</button>` : "";
+      return `<span class="cuehead">${cues.length ? "Cues" : "Cues"}</span>${chips}${editBtn}`;
+    }
+    function cueStrip(rec) {
+      const cues = (LIBRARY[rec.index] && LIBRARY[rec.index].cues) || [];
+      if (!cues.length && !rec.has_audio) return "";
+      return `<div class="cuestrip" data-strip="${rec.index}">${cueStripInner(rec.index, rec.has_audio)}</div>
+        <div class="editor-host" data-editor="${rec.index}"></div>`;
+    }
+    function refreshCueStrip(index) {
+      const el = document.querySelector(`[data-strip="${index}"]`);
+      if (el) el.innerHTML = cueStripInner(index, true);
+    }
+
+    const KIND_COLOR = { mix_in: "#28c878", drop: "#e0575b", mix_out: "#4b9cf5", cue: "#9aa4b2" };
+
+    function onEdit(btn) {
+      const index = +btn.dataset.i;
+      const host = document.querySelector(`[data-editor="${index}"]`);
+      if (host.dataset.open) { closeEditor(host); return; }
+      openEditor(index, host);
+    }
+
+    function closeEditor(host) {
+      const a = host.querySelector("audio");
+      if (a) a.pause();
+      host.innerHTML = ""; delete host.dataset.open;
+    }
+
+    async function openEditor(index, host) {
+      host.innerHTML = `<div class="editor"><div class="hint">Loading waveform… <span class="spinner"></span></div></div>`;
+      host.dataset.open = "1";
+      let data;
+      try {
+        const r = await fetch(`/api/waveform/${index}`);
+        data = await r.json();
+        if (!r.ok) throw new Error(data.error || "waveform failed");
+      } catch (e) { host.innerHTML = `<div class="editor"><div class="err">${esc(e.message)}</div></div>`; return; }
+
+      const ed = {
+        index, host, peaks: data.peaks, duration: data.duration || 0,
+        cues: (data.cues || []).map(c => ({ ...c })), drag: null,
+      };
+      host.innerHTML = `<div class="editor">
+        <canvas></canvas>
+        <div class="transport">
+          <button class="playpause">▶ Play</button>
+          <span class="time">0:00.0 / ${mmss(ed.duration)}</span>
+          <span class="hint">Click the waveform to seek · drag a marker to move a cue</span>
+        </div>
+        <div class="cuelist"></div>
+        <div class="editactions">
+          <button class="ghost addcue">+ Add cue at playhead</button>
+          <button class="savecues">Save cues</button>
+          <button class="ghost closeed">Close</button>
+        </div></div>`;
+      ed.canvas = host.querySelector("canvas");
+      ed.ctx = ed.canvas.getContext("2d");
+      ed.timeEl = host.querySelector(".time");
+      ed.cuelistEl = host.querySelector(".cuelist");
+      ed.audio = new Audio(`/api/audio/${index}`);
+      ed.audio.preload = "metadata";
+
+      sizeCanvas(ed); drawWave(ed); renderCueList(ed);
+
+      const pp = host.querySelector(".playpause");
+      pp.onclick = () => { if (ed.audio.paused) ed.audio.play(); else ed.audio.pause(); };
+      ed.audio.onplay = () => { pp.textContent = "⏸ Pause"; tick(ed); };
+      ed.audio.onpause = () => { pp.textContent = "▶ Play"; };
+      ed.audio.ontimeupdate = () => updateTime(ed);
+      host.querySelector(".addcue").onclick = () => {
+        ed.cues.push({ name: "Cue", start_sec: +ed.audio.currentTime.toFixed(3), kind: "cue" });
+        ed.cues.sort((a, b) => a.start_sec - b.start_sec); drawWave(ed); renderCueList(ed);
+      };
+      host.querySelector(".closeed").onclick = () => closeEditor(host);
+      host.querySelector(".savecues").onclick = () => saveCues(ed, host.querySelector(".savecues"));
+
+      // Canvas seek + marker drag.
+      const posX = (e) => (e.clientX - ed.canvas.getBoundingClientRect().left) / ed.canvas.clientWidth;
+      ed.canvas.onpointerdown = (e) => {
+        const frac = Math.max(0, Math.min(1, posX(e)));
+        const hit = nearestMarker(ed, frac);
+        if (hit >= 0) { ed.drag = hit; ed.canvas.setPointerCapture(e.pointerId); }
+        else if (ed.duration) { ed.audio.currentTime = frac * ed.duration; updateTime(ed); }
+      };
+      ed.canvas.onpointermove = (e) => {
+        if (ed.drag == null) return;
+        ed.cues[ed.drag].start_sec = +Math.max(0, Math.min(ed.duration, posX(e) * ed.duration)).toFixed(3);
+        drawWave(ed); renderCueList(ed);
+      };
+      ed.canvas.onpointerup = () => { ed.drag = null; };
+    }
+
+    function sizeCanvas(ed) {
+      const dpr = window.devicePixelRatio || 1;
+      const w = ed.canvas.clientWidth || 600, h = 96;
+      ed.canvas.width = w * dpr; ed.canvas.height = h * dpr;
+      ed.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ed._w = w; ed._h = h;
+    }
+
+    function drawWave(ed) {
+      const { ctx, peaks } = ed, w = ed._w, h = ed._h, mid = h / 2;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--muted") || "#889";
+      const n = peaks.length || 1, bw = w / n;
+      for (let i = 0; i < n; i++) {
+        const ph = Math.max(1, peaks[i] * (h * 0.9));
+        ctx.fillRect(i * bw, mid - ph / 2, Math.max(1, bw - 0.5), ph);
+      }
+      // markers
+      ed.cues.forEach(c => {
+        const x = ed.duration ? (c.start_sec / ed.duration) * w : 0;
+        ctx.fillStyle = KIND_COLOR[c.kind] || KIND_COLOR.cue;
+        ctx.fillRect(x - 1, 0, 2, h);
+        ctx.fillRect(x - 4, 0, 8, 4);
+      });
+      // playhead
+      if (ed.duration && ed.audio) {
+        const px = (ed.audio.currentTime / ed.duration) * w;
+        ctx.fillStyle = "#fff"; ctx.globalAlpha = 0.85;
+        ctx.fillRect(px - 0.5, 0, 1.5, h); ctx.globalAlpha = 1;
+      }
+    }
+
+    function nearestMarker(ed, frac) {
+      const x = frac * ed._w; let best = -1, bd = 7;
+      ed.cues.forEach((c, i) => {
+        const mx = ed.duration ? (c.start_sec / ed.duration) * ed._w : 0;
+        if (Math.abs(mx - x) < bd) { bd = Math.abs(mx - x); best = i; }
+      });
+      return best;
+    }
+
+    function updateTime(ed) {
+      ed.timeEl.textContent = `${mmss(ed.audio.currentTime)} / ${mmss(ed.duration)}`;
+      drawWave(ed);
+    }
+    function tick(ed) {
+      if (ed.audio.paused) return;
+      updateTime(ed);
+      requestAnimationFrame(() => tick(ed));
+    }
+
+    function renderCueList(ed) {
+      ed.cuelistEl.innerHTML = ed.cues.map((c, i) => `
+        <div class="cuerow" data-ci="${i}">
+          <span class="dot" style="background:${KIND_COLOR[c.kind] || KIND_COLOR.cue}"></span>
+          <input class="nm" value="${esc(c.name)}" />
+          <span class="t">${mmss(c.start_sec)}</span>
+          <button class="ghost jump">▶</button>
+          <button class="ghost setph" title="set to playhead">⇥ set</button>
+          <button class="ghost nudge" data-d="-0.1">−0.1</button>
+          <button class="ghost nudge" data-d="0.1">+0.1</button>
+          <button class="ghost del" title="delete">✕</button>
+        </div>`).join("");
+      ed.cuelistEl.querySelectorAll(".cuerow").forEach(row => {
+        const i = +row.dataset.ci;
+        row.querySelector(".nm").onchange = (e) => { ed.cues[i].name = e.target.value; };
+        row.querySelector(".jump").onclick = () => { ed.audio.currentTime = ed.cues[i].start_sec; ed.audio.play(); };
+        row.querySelector(".setph").onclick = () => { ed.cues[i].start_sec = +ed.audio.currentTime.toFixed(3); drawWave(ed); renderCueList(ed); };
+        row.querySelectorAll(".nudge").forEach(b => b.onclick = () => {
+          ed.cues[i].start_sec = +Math.max(0, ed.cues[i].start_sec + parseFloat(b.dataset.d)).toFixed(3);
+          drawWave(ed); renderCueList(ed);
+        });
+        row.querySelector(".del").onclick = () => { ed.cues.splice(i, 1); drawWave(ed); renderCueList(ed); };
+      });
+    }
+
+    async function saveCues(ed, btn) {
+      btn.disabled = true; const t = btn.textContent; btn.innerHTML = '<span class="spinner"></span>';
+      try {
+        const r = await fetch(`/api/track/${ed.index}/cues`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cues: ed.cues }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "save failed");
+        if (LIBRARY[ed.index]) LIBRARY[ed.index].cues = d.cues;
+        ed.cues = d.cues.map(c => ({ ...c }));
+        refreshCueStrip(ed.index);
+        drawWave(ed); renderCueList(ed);
+        btn.textContent = "Saved ✓";
+        setTimeout(() => { btn.textContent = t; btn.disabled = false; }, 1200);
+      } catch (e) { alert(e.message); btn.textContent = t; btn.disabled = false; }
     }
 
     // One delegated click handler for all candidate action buttons.
@@ -349,6 +597,7 @@
       if (!btn) return;
       if (btn.dataset.action === "analyze") onAnalyze(btn);
       else if (btn.dataset.action === "cues") onCues(btn);
+      else if (btn.dataset.action === "edit") onEdit(btn);
     });
 
     async function onAnalyze(btn) {

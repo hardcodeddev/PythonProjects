@@ -16,13 +16,15 @@ This is a single-user local tool: the loaded library lives in process memory.
 
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 from dataclasses import asdict
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, abort, jsonify, render_template, request, send_file
 
 import doubling_score as ds
+import library_cues as lc
 
 app = Flask(__name__)
 
@@ -162,6 +164,123 @@ def cues():
 
     out = ds.DoublingEngine().suggest_cues(meta_a, meta_b, remap=_remap_from(payload))
     return jsonify(out)
+
+
+@app.post("/api/scan")
+def scan():
+    """Scan folder(s) of audio files, detect BPM/key/cues, load as the library."""
+    payload = request.get_json(force=True, silent=True) or {}
+    folders = payload.get("folders") or []
+    if isinstance(folders, str):
+        folders = [ln for ln in folders.splitlines() if ln.strip()]
+    folders = [f for f in folders if f and f.strip()]
+    if not folders:
+        return jsonify(error="Give at least one folder path."), 400
+
+    bad = [f for f in folders if not os.path.isdir(os.path.expanduser(f.strip()))]
+    if bad:
+        return jsonify(error=f"Not a folder on this machine: {', '.join(bad)}"), 400
+
+    recursive = bool(payload.get("recursive", True))
+    max_files = payload.get("max_files")
+    try:
+        tracks = lc.analyze_folders(
+            folders, recursive=recursive, max_files=int(max_files) if max_files else None
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(error=f"Scan failed: {exc}"), 500
+
+    STATE["tracks"] = tracks
+    STATE["source"] = f"{len(folders)} folder(s)"
+    failed = [t["title"] for t in tracks if t.get("error")]
+    return jsonify(
+        source=STATE["source"],
+        count=len(tracks),
+        with_key=sum(1 for t in tracks if t.get("camelot_key")),
+        with_bpm=sum(1 for t in tracks if t.get("bpm")),
+        with_path=sum(1 for t in tracks if t.get("path")),
+        total_cues=sum(len(t.get("cues", [])) for t in tracks),
+        failed=failed,
+        tracks=[
+            {**{k: t.get(k) for k in _SUMMARY_FIELDS}, "cues": t.get("cues", [])}
+            for t in tracks
+        ],
+    )
+
+
+def _local_track_or_404(index: int) -> dict:
+    tracks = STATE["tracks"]
+    if not (0 <= index < len(tracks)):
+        abort(404)
+    meta = tracks[index]
+    path = meta.get("path")
+    if not path or not ds._is_local_path(path) or not os.path.isfile(path):
+        abort(404)
+    return meta
+
+
+@app.get("/api/audio/<int:index>")
+def audio(index):
+    """Stream a track's local audio file (Range-enabled) for the preview player."""
+    meta = _local_track_or_404(index)
+    return send_file(meta["path"], conditional=True)
+
+
+@app.get("/api/waveform/<int:index>")
+def waveform(index):
+    """Downsampled waveform peaks + current cues for the cue editor."""
+    meta = _local_track_or_404(index)
+    try:
+        peaks, duration = lc.waveform_peaks(meta["path"])
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(error=f"waveform failed: {exc}"), 500
+    return jsonify(
+        peaks=peaks,
+        duration=duration,
+        bpm=meta.get("bpm"),
+        first_beat_sec=meta.get("first_beat_sec", 0.0),
+        cues=meta.get("cues", []),
+    )
+
+
+@app.post("/api/track/<int:index>/cues")
+def save_cues(index):
+    """Persist manually-edited cues back onto a track (used by export)."""
+    tracks = STATE["tracks"]
+    if not (0 <= index < len(tracks)):
+        return jsonify(error="Invalid track index."), 400
+    payload = request.get_json(force=True, silent=True) or {}
+    cleaned = []
+    for c in payload.get("cues", []):
+        try:
+            start = float(c["start_sec"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cleaned.append({
+            "name": str(c.get("name", "Cue"))[:40],
+            "start_sec": round(max(0.0, start), 3),
+            "kind": c.get("kind") if c.get("kind") in ("drop", "mix_in", "mix_out") else "cue",
+        })
+    cleaned.sort(key=lambda c: c["start_sec"])
+    tracks[index]["cues"] = cleaned
+    return jsonify(ok=True, cues=cleaned)
+
+
+@app.get("/api/export.xml")
+def export_xml():
+    """Download the scanned library as a Rekordbox XML with beatgrid + hot cues."""
+    tracks = [t for t in STATE["tracks"] if t.get("cues")]
+    if not tracks:
+        return jsonify(error="No analyzed tracks with cues — scan a folder first."), 400
+    tree = lc.build_rekordbox_xml(tracks)
+    import xml.etree.ElementTree as ET
+    ET.indent(tree, space="  ")
+    buf = io.BytesIO()
+    tree.write(buf, encoding="UTF-8", xml_declaration=True)
+    buf.seek(0)
+    return send_file(
+        buf, mimetype="application/xml", as_attachment=True, download_name="rekordbox_auto_cues.xml"
+    )
 
 
 if __name__ == "__main__":
