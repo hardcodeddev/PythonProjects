@@ -20,6 +20,7 @@ import io
 import os
 import tempfile
 from dataclasses import asdict
+from urllib.parse import unquote, urlparse
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
@@ -45,6 +46,22 @@ def _engine_from(payload: dict) -> ds.DoublingEngine:
         weight_rhythm=float(w.get("rhythm", ds.WEIGHT_RHYTHM_POCKET)),
         bpm_tolerance_pct=float(payload.get("tolerance_pct", 2.0)),
     )
+
+
+def _normalize_input_path(raw: str) -> str:
+    """Make a user-supplied folder path usable: strip quotes, expand ~, decode a
+    file:// URL, and URL-decode (%20 -> space) when that resolves to a real dir.
+    """
+    if not raw:
+        return ""
+    p = raw.strip().strip('"').strip("'")
+    if p.startswith("file://"):
+        p = unquote(urlparse(p).path)
+    p = os.path.expanduser(p)
+    if os.path.isdir(p):
+        return p
+    decoded = unquote(p)  # handles pasted paths with %20 etc.
+    return decoded if os.path.isdir(decoded) else p
 
 
 def _remap_from(payload: dict):
@@ -166,6 +183,45 @@ def cues():
     return jsonify(out)
 
 
+@app.get("/api/browse")
+def browse():
+    """List sub-folders of a directory for the folder picker (local machine)."""
+    path = _normalize_input_path(request.args.get("path", "")) or os.path.expanduser("~")
+    if not os.path.isdir(path):
+        path = os.path.expanduser("~")
+
+    entries = []
+    try:
+        for name in sorted(os.listdir(path), key=str.lower):
+            if name.startswith("."):
+                continue
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                entries.append({"name": name, "path": full})
+    except OSError as exc:
+        return jsonify(error=f"Can't open {path}: {exc}"), 400
+
+    try:
+        here_audio = sum(1 for f in os.listdir(path) if f.lower().endswith(lc.AUDIO_EXTS))
+    except OSError:
+        here_audio = 0
+
+    # Quick links: home, root, and any mounted volumes (USB / external drives).
+    quick = [{"name": "🏠 Home", "path": os.path.expanduser("~")}, {"name": "/ Root", "path": "/"}]
+    for mount in ("/Volumes", "/media", "/mnt"):
+        if os.path.isdir(mount):
+            try:
+                for d in sorted(os.listdir(mount)):
+                    p = os.path.join(mount, d)
+                    if os.path.isdir(p) and not d.startswith("."):
+                        quick.append({"name": f"💾 {d}", "path": p})
+            except OSError:
+                pass
+
+    parent = os.path.dirname(path.rstrip("/")) or "/"
+    return jsonify(path=path, parent=parent, entries=entries, quick=quick, here_audio=here_audio)
+
+
 @app.post("/api/scan")
 def scan():
     """Scan folder(s) of audio files, detect BPM/key/cues, load as the library."""
@@ -173,11 +229,12 @@ def scan():
     folders = payload.get("folders") or []
     if isinstance(folders, str):
         folders = [ln for ln in folders.splitlines() if ln.strip()]
-    folders = [f for f in folders if f and f.strip()]
+    folders = [_normalize_input_path(f) for f in folders if f and str(f).strip()]
+    folders = [f for f in folders if f]
     if not folders:
-        return jsonify(error="Give at least one folder path."), 400
+        return jsonify(error="Pick at least one folder."), 400
 
-    bad = [f for f in folders if not os.path.isdir(os.path.expanduser(f.strip()))]
+    bad = [f for f in folders if not os.path.isdir(f)]
     if bad:
         return jsonify(error=f"Not a folder on this machine: {', '.join(bad)}"), 400
 
