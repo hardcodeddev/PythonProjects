@@ -1018,6 +1018,7 @@ def load_rekordbox_xml(
                 "artist": artist,
                 "name": name,
                 "path": _rekordbox_location_to_path(location),
+                "location": location,  # kept so streaming (SoundCloud) IDs survive
                 "streaming": _is_streaming_location(location),
                 "bpm": bpm,
                 "camelot_key": camelot,
