@@ -97,6 +97,8 @@
     .cuepanel .drops .sub { background: var(--panel); }
     .cuestrip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 0 2px; }
     .cuestrip .cuehead { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; }
+    a.sub { text-decoration: none; cursor: pointer; }
+    a.sub:hover { filter: brightness(1.15); }
     .sub.cue-drop { border-color: var(--bad); color: var(--bad); }
     .sub.cue-mix_in { border-color: var(--good); color: var(--good); }
     .sub.cue-mix_out { border-color: var(--ok); color: var(--ok); }
@@ -179,6 +181,17 @@
         <div id="scanErr" class="err" hidden></div>
         <p class="muted" style="font-size:12px;margin:8px 0 0">Detects BPM, key and drop / mix-in / mix-out cues from the audio. Runs on this machine; large folders take a while. Then download a Rekordbox XML to import the cues.</p>
         <button class="ghost full" id="exportBtn" hidden style="margin-top:10px">⬇ Download Rekordbox XML (cues)</button>
+      </div>
+
+      <div class="panel">
+        <h2>SoundCloud downloads (optional)</h2>
+        <label>Client ID</label>
+        <input type="text" id="scId" placeholder="from developers.soundcloud.com" autocomplete="off" />
+        <label>Client Secret</label>
+        <input type="password" id="scSecret" autocomplete="off" />
+        <button class="ghost full" id="scBtn" style="margin-top:10px">Check SoundCloud tracks</button>
+        <div id="scErr" class="err" hidden></div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">Checks your library's SoundCloud (streaming) tracks for free-download / purchase availability. Credentials stay in memory on this machine — never saved or committed. Or set <code>SOUNDCLOUD_CLIENT_ID/SECRET</code> env vars.</p>
       </div>
 
       <div class="panel weights">
@@ -381,7 +394,7 @@
             <span class="tmeta">
               <span class="keychip">${t.camelot_key || "?"}</span>
               <span>${bpmFmt(t.bpm)} BPM</span>
-              <span>${cues.length} cue${cues.length === 1 ? "" : "s"}</span>
+              ${t.streaming ? scChip(t) : `<span>${cues.length} cue${cues.length === 1 ? "" : "s"}</span>`}
             </span>
           </summary>
           <div class="cands">${cueStrip(rec)}</div>
@@ -457,6 +470,34 @@
     });
 
     $("exportBtn").addEventListener("click", () => { window.location = "/api/export.xml"; });
+
+    // --- SoundCloud lookup ---
+    $("scBtn").addEventListener("click", async () => {
+      const err = $("scErr"); err.hidden = true;
+      if (!LIBRARY.length) { err.textContent = "Load a library first."; err.hidden = false; return; }
+      const btn = $("scBtn"); btn.disabled = true; btn.innerHTML = 'Checking SoundCloud… <span class="spinner"></span>';
+      try {
+        const body = { client_id: $("scId").value.trim(), client_secret: $("scSecret").value.trim() };
+        const r = await fetch("/api/soundcloud", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "SoundCloud lookup failed");
+        LIBRARY = d.tracks;
+        MODE = "library";
+        $("resultMeta").textContent = `SoundCloud: ${d.sc_free} free · ${d.sc_buy} buy · of ${d.sc_checked} checked (${d.sc_streaming} streaming)`;
+        render();
+      } catch (e) { err.textContent = e.message; err.hidden = false; }
+      finally { btn.disabled = false; btn.textContent = "Check SoundCloud tracks"; }
+    });
+
+    // Download/purchase status chip for a SoundCloud track (after a lookup).
+    function scChip(t) {
+      const s = t && t.sc;
+      if (!s) return "";
+      if (s.error) return `<span class="sub" title="${esc(s.error)}">SC: ${esc(s.error)}</span>`;
+      if (s.kind === "free") return `<a class="sub cue-mix_in" href="${esc(s.download_url || s.permalink_url || "#")}" target="_blank" rel="noopener">⬇ Free download</a>`;
+      if (s.kind === "buy") return `<a class="sub cue-mix_out" href="${esc(s.purchase_url || s.permalink_url || "#")}" target="_blank" rel="noopener">$ ${esc(s.purchase_title || "Buy")}</a>`;
+      return `<a class="sub" href="${esc(s.permalink_url || "#")}" target="_blank" rel="noopener">stream only</a>`;
+    }
 
     // --- Rank ---
     $("rankBtn").addEventListener("click", async () => {
@@ -552,6 +593,7 @@
             <span class="tmeta">
               <span class="keychip">${rec.camelot_key || "?"}</span>
               <span>${bpmFmt(rec.bpm)} BPM</span>
+              ${scChip(LIBRARY[rec.index])}
               <span>${rec.candidates.length} matches</span>
             </span>
           </summary>

@@ -26,6 +26,7 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 
 import doubling_score as ds
 import library_cues as lc
+import soundcloud as sc
 
 app = Flask(__name__)
 
@@ -33,7 +34,7 @@ app = Flask(__name__)
 STATE: dict = {"tracks": [], "source": None}
 
 _TRUE = {"1", "true", "on", "yes", "True"}
-_SUMMARY_FIELDS = ("title", "artist", "bpm", "camelot_key", "path", "streaming")
+_SUMMARY_FIELDS = ("title", "artist", "bpm", "camelot_key", "path", "streaming", "location")
 
 
 def _library_response(tracks: list[dict], **extra) -> dict:
@@ -46,7 +47,10 @@ def _library_response(tracks: list[dict], **extra) -> dict:
         with_path=sum(1 for t in tracks if t.get("path")),
         streaming=sum(1 for t in tracks if t.get("streaming")),
         total_cues=sum(len(t.get("cues", [])) for t in tracks),
-        tracks=[{**{k: t.get(k) for k in _SUMMARY_FIELDS}, "cues": t.get("cues", [])} for t in tracks],
+        tracks=[
+            {**{k: t.get(k) for k in _SUMMARY_FIELDS}, "cues": t.get("cues", []), "sc": t.get("sc")}
+            for t in tracks
+        ],
     )
     payload.update(extra)
     return payload
@@ -344,6 +348,38 @@ def save_cues(index):
     cleaned.sort(key=lambda c: c["start_sec"])
     tracks[index]["cues"] = cleaned
     return jsonify(ok=True, cues=cleaned)
+
+
+@app.post("/api/soundcloud")
+def soundcloud_lookup():
+    """Look up free-download / purchase status for the library's SoundCloud tracks."""
+    tracks = STATE["tracks"]
+    if not tracks:
+        return jsonify(error="Load a library first."), 400
+    payload = request.get_json(force=True, silent=True) or {}
+    client_id = (payload.get("client_id") or os.environ.get("SOUNDCLOUD_CLIENT_ID") or "").strip()
+    client_secret = (payload.get("client_secret") or os.environ.get("SOUNDCLOUD_CLIENT_SECRET") or "").strip()
+    if not client_id or not client_secret:
+        return jsonify(error="Enter your SoundCloud client_id and client_secret "
+                             "(or set SOUNDCLOUD_CLIENT_ID / SOUNDCLOUD_CLIENT_SECRET)."), 400
+
+    streaming = sum(1 for t in tracks if t.get("streaming"))
+    if not streaming:
+        return jsonify(error="No SoundCloud / streaming tracks in this library."), 400
+
+    try:
+        results = sc.enrich_library(tracks, client_id, client_secret, limit=payload.get("limit"))
+    except sc.SoundCloudError as exc:
+        return jsonify(error=str(exc)), 400
+
+    vals = list(results.values())
+    return jsonify(_library_response(
+        tracks,
+        sc_streaming=streaming,
+        sc_checked=len(results),
+        sc_free=sum(1 for v in vals if v.get("kind") == "free"),
+        sc_buy=sum(1 for v in vals if v.get("kind") == "buy"),
+    ))
 
 
 @app.get("/api/export.xml")

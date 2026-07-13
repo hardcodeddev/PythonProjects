@@ -48,6 +48,19 @@ drag a marker on the waveform to move a cue. **Save cues** persists the edits so
 the exported Rekordbox XML uses your adjusted positions. (Streaming tracks have
 no local audio, so preview/auto-cue don't apply to them.)
 
+## SoundCloud downloads (`soundcloud.py`)
+
+For the SoundCloud (streaming) tracks in a Rekordbox library, an optional lookup
+tells you which are **free downloads** vs. **paid** vs. stream-only. Rekordbox
+stores these as `soundcloud:tracks:<ID>`; with a SoundCloud developer app the
+tool gets a `client_credentials` token and queries `GET /tracks/{id}` for the
+`downloadable` / `purchase_url` fields. Enter your **client_id / client_secret**
+in the SoundCloud panel (kept in memory only — never saved or committed), or set
+`SOUNDCLOUD_CLIENT_ID` / `SOUNDCLOUD_CLIENT_SECRET`. Results show as a
+**⬇ Free download** / **$ Buy** link on each streaming track. Endpoints and auth
+scheme are overridable via env (`SOUNDCLOUD_TOKEN_URL`, `SOUNDCLOUD_API_BASE`,
+`SOUNDCLOUD_AUTH_SCHEME`).
+
 ## Web app
 
 A local Flask front end (`app.py` + `templates/index.html`) makes it usable
