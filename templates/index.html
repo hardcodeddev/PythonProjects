@@ -37,9 +37,9 @@
     .panel + .panel { margin-top: 16px; }
     .panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
     label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
-    input[type=file], input[type=text], input[type=number], select {
+    input[type=file], input[type=text], input[type=number], select, textarea {
       width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line);
-      background: var(--panel-2); color: var(--text); font-size: 13px;
+      background: var(--panel-2); color: var(--text); font-size: 13px; font-family: inherit; resize: vertical;
     }
     .row { display: flex; gap: 8px; }
     .row > * { flex: 1; }
@@ -95,6 +95,11 @@
     .cuepanel li { margin: 3px 0; }
     .cuepanel .drops { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .cuepanel .drops .sub { background: var(--panel); }
+    .cuestrip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 0 2px; }
+    .cuestrip .cuehead { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; }
+    .sub.cue-drop { border-color: var(--bad); color: var(--bad); }
+    .sub.cue-mix_in { border-color: var(--good); color: var(--good); }
+    .sub.cue-mix_out { border-color: var(--ok); color: var(--ok); }
     .err { color: var(--bad); font-size: 12px; margin-top: 10px; }
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -127,6 +132,17 @@
         <button class="full" id="uploadBtn">Load library</button>
         <div id="uploadErr" class="err" hidden></div>
         <div class="stats" id="stats" hidden></div>
+      </div>
+
+      <div class="panel">
+        <h2>Scan music folders</h2>
+        <label>Folder path(s) on this machine — one per line</label>
+        <textarea id="folders" rows="3" placeholder="/Users/you/Music/Bass&#10;/Volumes/USB/Sets"></textarea>
+        <div class="check"><input type="checkbox" id="recursive" checked /> <label style="margin:0">Include subfolders</label></div>
+        <button class="full" id="scanBtn">Scan &amp; auto-cue</button>
+        <div id="scanErr" class="err" hidden></div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">Detects BPM, key and drop / mix-in / mix-out cues from the audio. Runs on this machine; large folders take a while. Then download a Rekordbox XML to import the cues.</p>
+        <button class="ghost full" id="exportBtn" hidden style="margin-top:10px">⬇ Download Rekordbox XML (cues)</button>
       </div>
 
       <div class="panel weights">
@@ -227,21 +243,50 @@
         const r = await fetch("/api/upload", { method: "POST", body: fd });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Upload failed");
-        LIBRARY = d.tracks;
-        $("stats").hidden = false;
-        $("stats").innerHTML = `
-          <div class="stat"><b>${d.count}</b> tracks</div>
-          <div class="stat"><b>${d.with_key}</b> with key</div>
-          <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
-          <div class="stat"><b>${d.with_path}</b> with audio file</div>
-          ${d.streaming ? `<div class="stat"><b>${d.streaming}</b> streaming</div>` : ""}`;
-        $("rankBtn").disabled = false;
+        onLibraryLoaded(d);
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
       } finally {
         $("uploadBtn").disabled = false; $("uploadBtn").textContent = "Load library";
       }
     });
+
+    // Shared handling once a library is available (from upload or folder scan).
+    function onLibraryLoaded(d) {
+      LIBRARY = d.tracks;
+      $("stats").hidden = false;
+      $("stats").innerHTML = `
+        <div class="stat"><b>${d.count}</b> tracks</div>
+        <div class="stat"><b>${d.with_key}</b> with key</div>
+        <div class="stat"><b>${d.with_bpm}</b> with BPM</div>
+        <div class="stat"><b>${d.with_path}</b> with audio file</div>
+        ${d.streaming ? `<div class="stat"><b>${d.streaming}</b> streaming</div>` : ""}
+        ${d.total_cues ? `<div class="stat"><b>${d.total_cues}</b> cues detected</div>` : ""}`;
+      $("rankBtn").disabled = false;
+      $("exportBtn").hidden = !d.total_cues;
+    }
+
+    // Scan folders -> detect BPM/key/cues.
+    $("scanBtn").addEventListener("click", async () => {
+      const err = $("scanErr"); err.hidden = true;
+      const folders = $("folders").value;
+      if (!folders.trim()) { err.textContent = "Enter a folder path."; err.hidden = false; return; }
+      const btn = $("scanBtn"); btn.disabled = true; btn.innerHTML = 'Scanning & analyzing… <span class="spinner"></span>';
+      try {
+        const body = { folders, recursive: $("recursive").checked };
+        const r = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Scan failed");
+        onLibraryLoaded(d);
+        if (d.failed && d.failed.length) { err.textContent = `${d.failed.length} file(s) could not be analyzed.`; err.hidden = false; }
+      } catch (e) {
+        err.textContent = e.message; err.hidden = false;
+      } finally {
+        btn.disabled = false; btn.textContent = "Scan & auto-cue";
+      }
+    });
+
+    $("exportBtn").addEventListener("click", () => { window.location = "/api/export.xml"; });
 
     // --- Rank ---
     $("rankBtn").addEventListener("click", async () => {
@@ -339,8 +384,17 @@
               <span>${rec.candidates.length} matches</span>
             </span>
           </summary>
-          <div class="cands">${rec.candidates.map(c => candRow(rec, c)).join("")}</div>
+          <div class="cands">${cueStrip(rec)}${rec.candidates.map(c => candRow(rec, c)).join("")}</div>
         </details>`).join("");
+    }
+
+    // Detected hot cues for a scanned track (from the library, by original index).
+    function cueStrip(rec) {
+      const lib = LIBRARY[rec.index];
+      const cues = lib && lib.cues;
+      if (!cues || !cues.length) return "";
+      const chips = cues.map(c => `<span class="sub cue-${esc(c.kind)}">${esc(c.name)} ${mmss(c.start_sec)}</span>`).join("");
+      return `<div class="cuestrip"><span class="cuehead">Auto cues</span>${chips}</div>`;
     }
 
     // One delegated click handler for all candidate action buttons.

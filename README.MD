@@ -14,6 +14,19 @@ The reusable core is `DoublingEngine` (tunable weights + `rank()`). Input can be
 JSON track list or a **rekordbox library XML export** (`AverageBpm` → BPM,
 `Tonality` → Camelot key via `musical_key_to_camelot`, `Location` → file path).
 
+## Auto-cue from folders (`library_cues.py`)
+
+Point at folder(s) of `.mp3/.wav/.aiff/.flac` files and the tool detects each
+track's tempo, key (Krumhansl-Schmuckler on chroma) and structure, then places
+hot cues at the mix points — **Drop(s)** and **Mix-in / Mix-out** phrases — and
+exports a **Rekordbox library XML** (per-track `TEMPO` beatgrid + colored
+`POSITION_MARK` hot cues). Rekordbox imports it directly, and it's the standard
+interchange other tools convert onward to Serato / Traktor / Engine. Source
+audio is never modified. Scanned tracks also feed straight into the doubling
+ranking. Cue detection is heuristic (energy + beat grid) — solid starting cues
+to nudge by ear. In the web app: **Scan & auto-cue**, then **Download Rekordbox
+XML (cues)**.
+
 ## Web app
 
 A local Flask front end (`app.py` + `templates/index.html`) makes it usable
