@@ -19,6 +19,7 @@ No third-party deps — uses urllib from the stdlib.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -100,34 +101,58 @@ def _http(method: str, url: str, data: bytes | None = None, headers: dict | None
         return resp.status, json.loads(body)
 
 
+def _request_token(client_id: str, client_secret: str, use_basic: bool) -> tuple[str, float]:
+    """One client_credentials token request. Credentials via HTTP Basic auth
+    (OAuth2 standard) when use_basic, otherwise as body params."""
+    params = {"grant_type": "client_credentials"}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json; charset=utf-8",
+    }
+    if use_basic:
+        cred = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        headers["Authorization"] = f"Basic {cred}"
+    else:
+        params["client_id"] = client_id
+        params["client_secret"] = client_secret
+    _status, data = _http("POST", TOKEN_URL, urllib.parse.urlencode(params).encode(), headers)
+    token = data.get("access_token")
+    if not token:
+        raise SoundCloudError("SoundCloud did not return an access_token.")
+    return token, float(data.get("expires_in", 3600))
+
+
 def get_token(client_id: str, client_secret: str, force: bool = False) -> str:
-    """App-only OAuth token via client_credentials, cached until near expiry."""
+    """App-only OAuth token via client_credentials, cached until near expiry.
+
+    Tries HTTP Basic auth first (what OAuth2 / SoundCloud expect), then falls
+    back to sending the credentials as body params, since SoundCloud has
+    documented both over time.
+    """
     now = time.time()
     if not force and _token_cache["token"] and _token_cache["exp"] > now + 30:
         return _token_cache["token"]
     if not client_id or not client_secret:
         raise SoundCloudError("Missing SoundCloud client_id / client_secret.")
 
-    body = urllib.parse.urlencode({
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-    }).encode()
-    headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
-    try:
-        _status, data = _http("POST", TOKEN_URL, body, headers)
-    except urllib.error.HTTPError as exc:
-        raise SoundCloudError(
-            f"Token request failed (HTTP {exc.code}). Check your client id/secret."
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise SoundCloudError(f"Could not reach SoundCloud: {exc.reason}") from exc
+    last_code = None
+    for use_basic in (True, False):
+        try:
+            token, expires_in = _request_token(client_id, client_secret, use_basic)
+            _token_cache.update(token=token, exp=now + expires_in)
+            return token
+        except urllib.error.HTTPError as exc:
+            last_code = exc.code
+            if exc.code in (400, 401, 403):  # credential-format issue — try the other style
+                continue
+            raise SoundCloudError(f"Token request failed (HTTP {exc.code}).") from exc
+        except urllib.error.URLError as exc:
+            raise SoundCloudError(f"Could not reach SoundCloud: {exc.reason}") from exc
 
-    token = data.get("access_token")
-    if not token:
-        raise SoundCloudError("SoundCloud did not return an access_token.")
-    _token_cache.update(token=token, exp=now + float(data.get("expires_in", 3600)))
-    return token
+    raise SoundCloudError(
+        f"Token request failed (HTTP {last_code}) with both Basic-auth and body credentials. "
+        "Confirm the Client ID/Secret are from a SoundCloud app with API access enabled."
+    )
 
 
 def _track_fields(data: dict) -> dict:
