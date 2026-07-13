@@ -216,7 +216,7 @@
         <input type="text" id="filter" placeholder="Filter tracks…" />
         <span class="muted" id="resultMeta"></span>
       </div>
-      <div id="results"><div class="empty">Load a library and hit <b>Rank</b> to see doubling candidates.</div></div>
+      <div id="results"><div class="empty"><b>Scan music folders</b> to auto-cue your tracks (they'll appear here to preview &amp; edit), or load a library and <b>Rank</b> for doubling matches.</div></div>
     </div>
   </div>
 
@@ -247,8 +247,9 @@
       ["key", "Key"], ["bpm", "BPM"], ["spectral", "Spectral"], ["rhythm", "Rhythm"],
     ];
     const $ = (id) => document.getElementById(id);
-    let LIBRARY = [];        // uploaded track summaries
+    let LIBRARY = [];        // scanned / uploaded track summaries
     let RECORDS = [];        // last ranking
+    let MODE = "empty";      // 'library' (scanned tracks + cues) | 'ranking' | 'empty'
 
     // --- Weight sliders ---
     const weightState = {};
@@ -298,7 +299,7 @@
         const r = await fetch("/api/upload", { method: "POST", body: fd });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Upload failed");
-        onLibraryLoaded(d);
+        onLibraryLoaded(d, false);
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
       } finally {
@@ -307,7 +308,9 @@
     });
 
     // Shared handling once a library is available (from upload or folder scan).
-    function onLibraryLoaded(d) {
+    // showLibrary=true (after a scan) renders the track + cue list right away so
+    // you can preview/edit cues without having to run a doubling ranking first.
+    function onLibraryLoaded(d, showLibrary) {
       LIBRARY = d.tracks;
       $("stats").hidden = false;
       $("stats").innerHTML = `
@@ -319,6 +322,41 @@
         ${d.total_cues ? `<div class="stat"><b>${d.total_cues}</b> cues detected</div>` : ""}`;
       $("rankBtn").disabled = false;
       $("exportBtn").hidden = !d.total_cues;
+      if (showLibrary) {
+        MODE = "library";
+        $("resultMeta").textContent =
+          `${d.count} tracks · ${d.total_cues || 0} auto cues — preview & edit below, then export or rank`;
+        render();
+      }
+    }
+
+    function hasLocalAudio(t) { return !!t && !!t.path && !t.streaming; }
+
+    function render() { MODE === "library" ? renderLibraryView() : renderResults(); }
+
+    // Scanned-library view: each track with its detected cues + preview/edit.
+    function renderLibraryView() {
+      const host = $("results");
+      if (!LIBRARY.length) { host.innerHTML = `<div class="empty">No tracks loaded.</div>`; return; }
+      const q = $("filter").value.trim().toLowerCase();
+      const items = LIBRARY.map((t, i) => ({ t, i })).filter(({ t }) => !q || (t.title || "").toLowerCase().includes(q));
+      if (!items.length) { host.innerHTML = `<div class="empty">No tracks match "${esc($("filter").value)}".</div>`; return; }
+      host.innerHTML = items.map(({ t, i }, idx) => {
+        const rec = { index: i, has_audio: hasLocalAudio(t) };
+        const cues = t.cues || [];
+        return `<details class="track" ${idx < 6 ? "open" : ""}>
+          <summary>
+            <span class="caret">▶</span>
+            <span class="tname">${esc(t.title || ("track " + i))}</span>
+            <span class="tmeta">
+              <span class="keychip">${t.camelot_key || "?"}</span>
+              <span>${bpmFmt(t.bpm)} BPM</span>
+              <span>${cues.length} cue${cues.length === 1 ? "" : "s"}</span>
+            </span>
+          </summary>
+          <div class="cands">${cueStrip(rec)}</div>
+        </details>`;
+      }).join("");
     }
 
     // --- Folder selection + browser ---
@@ -379,7 +417,7 @@
         const r = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Scan failed");
-        onLibraryLoaded(d);
+        onLibraryLoaded(d, true);
         if (d.failed && d.failed.length) { err.textContent = `${d.failed.length} file(s) could not be analyzed.`; err.hidden = false; }
       } catch (e) {
         err.textContent = e.message; err.hidden = false;
@@ -403,6 +441,7 @@
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Ranking failed");
         RECORDS = d.records;
+        MODE = "ranking";
         const scope = audioOnly ? `${d.compared} audio-file tracks (of ${d.count})` : `${d.count} tracks`;
         $("resultMeta").textContent = `${scope} · ${useAudio ? "full audio analysis" : "key/BPM only"}`;
         renderResults();
@@ -746,7 +785,7 @@
 
     function mmss(sec) { if (sec == null) return "?"; const m = Math.floor(sec / 60); return `${m}:${(sec - 60*m).toFixed(1).padStart(4,"0")}`; }
     function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m])); }
-    $("filter").addEventListener("input", renderResults);
+    $("filter").addEventListener("input", render);
 
     buildWeights();
   </script>
