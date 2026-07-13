@@ -26,8 +26,10 @@ audio is never modified. Scanned tracks also feed straight into the doubling
 ranking. Cue detection is heuristic (energy + beat grid) — solid starting cues
 to nudge by ear. In the web app: **Browse folders…** (a built-in picker that
 navigates the local machine, including mounted USB / external drives under
-`/Volumes`, `/media`, `/mnt`), **Scan & auto-cue**, then **Download Rekordbox
-XML (cues)**.
+`/Volumes`, `/media`, `/mnt`), **Scan & auto-cue** — the scanned tracks then
+appear in the results panel with their detected cues, ready to preview/edit —
+then **Download Rekordbox XML (cues)**. (Ranking for doubling matches is a
+separate, optional step.)
 
 ### Preview & edit cues
 
