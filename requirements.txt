@@ -3,3 +3,4 @@ librosa>=0.10
 flask>=3.0
 soundfile>=0.12
 mutagen>=1.46  # optional: reads artist/title tags during folder scans
+certifi>=2023.7  # CA bundle for SoundCloud HTTPS (fixes macOS cert verify)
