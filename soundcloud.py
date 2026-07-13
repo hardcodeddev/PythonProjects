@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -31,6 +32,26 @@ import urllib.request
 TOKEN_URL = os.environ.get("SOUNDCLOUD_TOKEN_URL", "https://secure.soundcloud.com/oauth/token")
 API_BASE = os.environ.get("SOUNDCLOUD_API_BASE", "https://api.soundcloud.com")
 AUTH_SCHEME = os.environ.get("SOUNDCLOUD_AUTH_SCHEME", "OAuth")  # SoundCloud uses "OAuth <token>"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """A verifying SSL context that actually has CA roots.
+
+    Fixes the common macOS "unable to get local issuer certificate" — the stock
+    python.org build ships no system trust store, so we point urllib at certifi's
+    bundle (or a CA file from SOUNDCLOUD_CA_BUNDLE / SSL_CERT_FILE).
+    """
+    ca = os.environ.get("SOUNDCLOUD_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+    if ca and os.path.exists(ca):
+        return ssl.create_default_context(cafile=ca)
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 - fall back to system defaults
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _ssl_context()
 
 _TRACK_ID_RE = re.compile(r"soundcloud[:/]+tracks[:/]+(\d+)", re.I)
 _URL_RE = re.compile(r"https?://(?:www\.|m\.)?soundcloud\.com/\S+", re.I)
@@ -74,7 +95,7 @@ def is_soundcloud(location: str | None) -> bool:
 def _http(method: str, url: str, data: bytes | None = None, headers: dict | None = None,
           timeout: int = 15) -> tuple[int, dict]:
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
         body = resp.read().decode("utf-8") or "{}"
         return resp.status, json.loads(body)
 
