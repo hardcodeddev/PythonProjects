@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tempfile
 from dataclasses import asdict
 from urllib.parse import unquote, urlparse
@@ -66,6 +67,20 @@ def _engine_from(payload: dict) -> ds.DoublingEngine:
         weight_rhythm=float(w.get("rhythm", ds.WEIGHT_RHYTHM_POCKET)),
         bpm_tolerance_pct=float(payload.get("tolerance_pct", 2.0)),
     )
+
+
+def _location_formats(tracks: list[dict]) -> str:
+    """Histogram of Location URI schemes in the library, for diagnostics."""
+    from collections import Counter
+    counts: Counter = Counter()
+    for t in tracks:
+        loc = t.get("location") or t.get("path") or ""
+        if not loc:
+            counts["(no location)"] += 1
+            continue
+        m = re.match(r"^([a-zA-Z][\w+.\-]*):", loc)
+        counts[m.group(1) if m else "(bare path)"] += 1
+    return ", ".join(f"{k}: {v}" for k, v in counts.most_common())
 
 
 def _normalize_input_path(raw: str) -> str:
@@ -363,9 +378,14 @@ def soundcloud_lookup():
         return jsonify(error="Enter your SoundCloud client_id and client_secret "
                              "(or set SOUNDCLOUD_CLIENT_ID / SOUNDCLOUD_CLIENT_SECRET)."), 400
 
-    streaming = sum(1 for t in tracks if t.get("streaming"))
-    if not streaming:
-        return jsonify(error="No SoundCloud / streaming tracks in this library."), 400
+    sc_tracks = sum(1 for t in tracks if sc.is_soundcloud(t.get("location") or t.get("path")))
+    if not sc_tracks:
+        return jsonify(error=(
+            "No SoundCloud tracks detected in this library. "
+            f"Location formats found: {_location_formats(tracks)}. "
+            "If your SoundCloud tracks use a different format, tell me one Location value "
+            "and I'll match it."
+        )), 400
 
     try:
         results = sc.enrich_library(tracks, client_id, client_secret, limit=payload.get("limit"))
@@ -375,10 +395,11 @@ def soundcloud_lookup():
     vals = list(results.values())
     return jsonify(_library_response(
         tracks,
-        sc_streaming=streaming,
+        sc_streaming=sc_tracks,
         sc_checked=len(results),
         sc_free=sum(1 for v in vals if v.get("kind") == "free"),
         sc_buy=sum(1 for v in vals if v.get("kind") == "buy"),
+        sc_errors=sum(1 for v in vals if v.get("kind") == "error"),
     ))
 
 

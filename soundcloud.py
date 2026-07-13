@@ -32,7 +32,8 @@ TOKEN_URL = os.environ.get("SOUNDCLOUD_TOKEN_URL", "https://secure.soundcloud.co
 API_BASE = os.environ.get("SOUNDCLOUD_API_BASE", "https://api.soundcloud.com")
 AUTH_SCHEME = os.environ.get("SOUNDCLOUD_AUTH_SCHEME", "OAuth")  # SoundCloud uses "OAuth <token>"
 
-_TRACK_ID_RE = re.compile(r"soundcloud:tracks:(\d+)")
+_TRACK_ID_RE = re.compile(r"soundcloud[:/]+tracks[:/]+(\d+)", re.I)
+_URL_RE = re.compile(r"https?://(?:www\.|m\.)?soundcloud\.com/\S+", re.I)
 _token_cache: dict = {"token": None, "exp": 0.0}
 
 
@@ -41,11 +42,33 @@ class SoundCloudError(Exception):
 
 
 def extract_track_id(location: str | None) -> str | None:
-    """'soundcloud:tracks:979092301' -> '979092301' (None if not a SC location)."""
+    """'soundcloud:tracks:979092301' -> '979092301' (None if not an id location)."""
     if not location:
         return None
     m = _TRACK_ID_RE.search(str(location))
     return m.group(1) if m else None
+
+
+def extract_track_ref(location: str | None):
+    """Return ('id', '12345') or ('url', 'https://soundcloud.com/...') or None.
+
+    Handles both how Rekordbox stores streaming tracks — a numeric id
+    ('soundcloud:tracks:<id>') and, as a fallback, a public permalink URL
+    (resolved via the API).
+    """
+    if not location:
+        return None
+    tid = extract_track_id(location)
+    if tid:
+        return ("id", tid)
+    m = _URL_RE.search(str(location))
+    if m:
+        return ("url", m.group(0))
+    return None
+
+
+def is_soundcloud(location: str | None) -> bool:
+    return extract_track_ref(location) is not None
 
 
 def _http(method: str, url: str, data: bytes | None = None, headers: dict | None = None,
@@ -86,11 +109,7 @@ def get_token(client_id: str, client_secret: str, force: bool = False) -> str:
     return token
 
 
-def lookup_track(track_id: str, token: str) -> dict:
-    """Fetch the download/purchase status for one SoundCloud track."""
-    url = f"{API_BASE}/tracks/{track_id}"
-    headers = {"Authorization": f"{AUTH_SCHEME} {token}", "Accept": "application/json"}
-    _status, data = _http("GET", url, None, headers)
+def _track_fields(data: dict) -> dict:
     return {
         "title": data.get("title"),
         "user": (data.get("user") or {}).get("username"),
@@ -101,6 +120,28 @@ def lookup_track(track_id: str, token: str) -> dict:
         "permalink_url": data.get("permalink_url"),
         "streamable": bool(data.get("streamable")),
     }
+
+
+def _auth_headers(token: str) -> dict:
+    return {"Authorization": f"{AUTH_SCHEME} {token}", "Accept": "application/json"}
+
+
+def lookup_track(track_id: str, token: str) -> dict:
+    """Download/purchase status for one SoundCloud track by numeric id."""
+    _status, data = _http("GET", f"{API_BASE}/tracks/{track_id}", None, _auth_headers(token))
+    return _track_fields(data)
+
+
+def resolve_track(url: str, token: str) -> dict:
+    """Resolve a SoundCloud permalink URL to its track and read the same fields."""
+    resolve = f"{API_BASE}/resolve?url={urllib.parse.quote(url, safe='')}"
+    _status, data = _http("GET", resolve, None, _auth_headers(token))
+    return _track_fields(data)
+
+
+def lookup_ref(ref, token: str) -> dict:
+    kind, value = ref
+    return lookup_track(value, token) if kind == "id" else resolve_track(value, token)
 
 
 def classify(info: dict) -> str:
@@ -125,21 +166,19 @@ def enrich_library(tracks: list[dict], client_id: str, client_secret: str,
     results: dict[int, dict] = {}
     checked = 0
     for i, t in enumerate(tracks):
-        if not t.get("streaming"):
-            continue
-        tid = extract_track_id(t.get("location") or t.get("path"))
-        if not tid:
+        ref = extract_track_ref(t.get("location") or t.get("path"))
+        if not ref:
             continue
         if limit and checked >= limit:
             break
         checked += 1
         try:
-            info = lookup_track(tid, token)
+            info = lookup_ref(ref, token)
         except urllib.error.HTTPError as exc:
             if exc.code == 401:  # token expired mid-run — refresh once and retry
                 token = get_token(client_id, client_secret, force=True)
                 try:
-                    info = lookup_track(tid, token)
+                    info = lookup_ref(ref, token)
                 except Exception as exc2:  # noqa: BLE001
                     info = {"error": f"HTTP {getattr(exc2, 'code', '?')}"}
             elif exc.code == 429:
