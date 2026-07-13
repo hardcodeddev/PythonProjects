@@ -258,6 +258,26 @@ def analyze_file(path: str, sr: int = _ANALYSIS_SR) -> dict:
     }
 
 
+def waveform_peaks(path: str, buckets: int = 1000, sr: int = 11025) -> tuple[list[float], float]:
+    """Downsampled |amplitude| peaks (0-1) + duration, for drawing a waveform.
+
+    Loads at a low sample rate — the overview only needs shape, not fidelity.
+    """
+    if librosa is None:
+        raise ImportError("librosa is required for waveform peaks.")
+    y, used_sr = librosa.load(path, sr=sr, mono=True)
+    n = len(y)
+    if n == 0:
+        return [], 0.0
+    step = max(1, n // buckets)
+    peaks = np.abs(y[: (n // step) * step]).reshape(-1, step).max(axis=1)
+    tail = np.abs(y[(n // step) * step:])
+    if len(tail):
+        peaks = np.append(peaks, tail.max())
+    scale = float(peaks.max()) or 1.0
+    return [round(float(p) / scale, 3) for p in peaks], round(n / used_sr, 3)
+
+
 def analyze_folders(folders, recursive: bool = True, max_files: Optional[int] = None,
                     progress=None) -> list[dict]:
     """Scan folder(s) and analyze every audio file found."""

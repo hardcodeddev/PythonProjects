@@ -21,7 +21,7 @@ import os
 import tempfile
 from dataclasses import asdict
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, abort, jsonify, render_template, request, send_file
 
 import doubling_score as ds
 import library_cues as lc
@@ -206,6 +206,64 @@ def scan():
             for t in tracks
         ],
     )
+
+
+def _local_track_or_404(index: int) -> dict:
+    tracks = STATE["tracks"]
+    if not (0 <= index < len(tracks)):
+        abort(404)
+    meta = tracks[index]
+    path = meta.get("path")
+    if not path or not ds._is_local_path(path) or not os.path.isfile(path):
+        abort(404)
+    return meta
+
+
+@app.get("/api/audio/<int:index>")
+def audio(index):
+    """Stream a track's local audio file (Range-enabled) for the preview player."""
+    meta = _local_track_or_404(index)
+    return send_file(meta["path"], conditional=True)
+
+
+@app.get("/api/waveform/<int:index>")
+def waveform(index):
+    """Downsampled waveform peaks + current cues for the cue editor."""
+    meta = _local_track_or_404(index)
+    try:
+        peaks, duration = lc.waveform_peaks(meta["path"])
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(error=f"waveform failed: {exc}"), 500
+    return jsonify(
+        peaks=peaks,
+        duration=duration,
+        bpm=meta.get("bpm"),
+        first_beat_sec=meta.get("first_beat_sec", 0.0),
+        cues=meta.get("cues", []),
+    )
+
+
+@app.post("/api/track/<int:index>/cues")
+def save_cues(index):
+    """Persist manually-edited cues back onto a track (used by export)."""
+    tracks = STATE["tracks"]
+    if not (0 <= index < len(tracks)):
+        return jsonify(error="Invalid track index."), 400
+    payload = request.get_json(force=True, silent=True) or {}
+    cleaned = []
+    for c in payload.get("cues", []):
+        try:
+            start = float(c["start_sec"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cleaned.append({
+            "name": str(c.get("name", "Cue"))[:40],
+            "start_sec": round(max(0.0, start), 3),
+            "kind": c.get("kind") if c.get("kind") in ("drop", "mix_in", "mix_out") else "cue",
+        })
+    cleaned.sort(key=lambda c: c["start_sec"])
+    tracks[index]["cues"] = cleaned
+    return jsonify(ok=True, cues=cleaned)
 
 
 @app.get("/api/export.xml")

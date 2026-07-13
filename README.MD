@@ -27,6 +27,15 @@ ranking. Cue detection is heuristic (energy + beat grid) — solid starting cues
 to nudge by ear. In the web app: **Scan & auto-cue**, then **Download Rekordbox
 XML (cues)**.
 
+### Preview & edit cues
+
+Each local track has a **Preview / edit cues** panel: a waveform with the cue
+markers, a player (click the waveform to seek), and per-cue controls — rename,
+jump-to, set-to-playhead, nudge ±0.1s, delete, and add-at-playhead. You can also
+drag a marker on the waveform to move a cue. **Save cues** persists the edits so
+the exported Rekordbox XML uses your adjusted positions. (Streaming tracks have
+no local audio, so preview/auto-cue don't apply to them.)
+
 ## Web app
 
 A local Flask front end (`app.py` + `templates/index.html`) makes it usable
